@@ -468,11 +468,57 @@ if (!fs.existsSync(MULTI_TENANT_FILE)) {
   }
 }
 
+const STORE_ID = 'main';
+let remoteSaveTimer: ReturnType<typeof setTimeout> | null = null;
+
+async function pushDbToSupabase() {
+  if (!supabase) return;
+  try {
+    const { error } = await supabase
+      .from('wa_store')
+      .upsert({ id: STORE_ID, data: db, updated_at: new Date().toISOString() });
+    if (error) console.error('Supabase save error:', error.message);
+  } catch (err) {
+    console.error('Supabase save failed:', err);
+  }
+}
+
+async function loadDbFromSupabase() {
+  if (!supabase) {
+    console.warn('⚠️ Supabase key nahi mili, data sirf local file mein hai.');
+    return;
+  }
+  try {
+    const { data, error } = await supabase
+      .from('wa_store')
+      .select('data')
+      .eq('id', STORE_ID)
+      .maybeSingle();
+    if (error) {
+      console.error('Supabase load error:', error.message);
+      return;
+    }
+    if (data && data.data) {
+      db = { ...initialMultiTenantDb, ...data.data };
+      console.log('✅ Data Supabase se load hua');
+    } else {
+      await pushDbToSupabase();
+      console.log('✅ Pehli dafa data Supabase mein save kiya');
+    }
+  } catch (err) {
+    console.error('Supabase load failed:', err);
+  }
+}
+
 function saveDb() {
   try {
     fs.writeFileSync(MULTI_TENANT_FILE, JSON.stringify(db, null, 2));
   } catch (err) {
     console.error('Failed to write multi_tenant_db.json:', err);
+  }
+  if (supabase) {
+    if (remoteSaveTimer) clearTimeout(remoteSaveTimer);
+    remoteSaveTimer = setTimeout(pushDbToSupabase, 2000);
   }
 }
 
@@ -1318,6 +1364,7 @@ setInterval(() => {
 
 // Start Server with Vite Middleware
 async function start() {
+    await loadDbFromSupabase();
   app.use('/api/*', (req, res, next) => {
     if (!res.headersSent) {
       res.status(404).json({ error: `API endpoint ${req.originalUrl} not found` });
