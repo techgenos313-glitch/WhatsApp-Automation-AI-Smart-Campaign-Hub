@@ -15,14 +15,20 @@ dotenv.config();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Initialize Supabase client
+// Initialize Supabase client (crash se bachne ke liye safe)
 const supabaseUrl = process.env.SUPABASE_URL || '';
 const supabaseKey = process.env.SUPABASE_ANON_KEY || '';
-export const supabase = createClient(supabaseUrl, supabaseKey);
+export const supabase =
+  supabaseUrl && supabaseKey ? createClient(supabaseUrl, supabaseKey) : null;
+
+if (!supabase) {
+  console.warn('⚠️ Supabase keys nahi mili, Supabase sync band hai.');
+}
 
 // Function to sync contacts to Supabase
 export async function saveContactToSupabase(category: string, name: string, phone: string) {
-  const { data, error } = await supabase
+  if (!supabase) return;
+  const { error } = await supabase
     .from('contacts')
     .insert([{ category, name, phone }]);
 
@@ -35,6 +41,7 @@ export async function saveContactToSupabase(category: string, name: string, phon
 
 // Function to log WhatsApp activity to Supabase
 export async function logActivityToSupabase(eventType: string, message: string, phone?: string) {
+  if (!supabase) return;
   const { error } = await supabase
     .from('logs')
     .insert([{ event_type: eventType, message, phone }]);
