@@ -46,15 +46,6 @@ export const CodeExportModal: React.FC<CodeExportModalProps> = ({
       "captionTemplate": "Invest in prime city residential plots! Contact: {phone}",
       "dailyLimit": 3,
       "sentToday": 0
-    },
-    {
-      "id": "custom_category",
-      "name": "My Custom Field",
-      "folderPath": "media/custom_category",
-      "videoFile": "custom_promo.mp4",
-      "captionTemplate": "Exclusive offer for {name}! Contact: {phone}",
-      "dailyLimit": 3,
-      "sentToday": 0
     }
   ],
   "clients": [
@@ -101,10 +92,30 @@ function saveStore() {
   fs.writeFileSync(CONTACTS_PATH, JSON.stringify(store, null, 2));
 }
 
-// Gemini AI Client
+// Gemini AI Client Initialization
 const ai = new GoogleGenAI({
   apiKey: process.env.GEMINI_API_KEY,
   httpOptions: { headers: { 'User-Agent': 'aistudio-build' } }
+});
+
+// Delete Client API Endpoint (Full record & log deletion)
+app.delete('/api/contacts/:id', (req, res) => {
+  const { id } = req.params;
+  const existingClient = store.clients.find(c => c.id === id);
+
+  if (!existingClient) {
+    return res.status(404).json({ success: false, error: 'Client not found / کلائنٹ نہیں ملا' });
+  }
+
+  // Delete client record
+  store.clients = store.clients.filter(c => c.id !== id);
+
+  // Clean up associated message logs & AI queues
+  if (store.messages) store.messages = store.messages.filter(m => m.contactId !== id);
+  if (store.aiQueue) store.aiQueue = store.aiQueue.filter(q => q.contactId !== id);
+
+  saveStore();
+  res.json({ success: true, message: \`Client '\${existingClient.name}' deleted successfully!\`, clients: store.clients });
 });
 
 // Helper: Build message with "السلام علیکم [Name]" and Urdu Footer
@@ -134,7 +145,6 @@ app.post('/api/send', async (req, res) => {
   const fullText = buildMessage(client.name, category);
   const jid = client.phone.replace(/[^0-9]/g, '') + '@s.whatsapp.net';
 
-  // Send via Baileys socket with attached local video media
   await sock.sendMessage(jid, {
     video: { url: videoFilePath },
     caption: fullText
@@ -167,12 +177,12 @@ export async function connectToWhatsApp(store, saveStore, ai) {
         const senderJid = msg.key.remoteJid;
         console.log(\`📩 Client reply from \${senderJid}: \${text}\`);
 
-        // Wait 5 minutes using setTimeout (Requirement #4)
+        // Wait 5 minutes using setTimeout
         setTimeout(async () => {
           console.log(\`🤖 5 minutes elapsed. Generating Gemini AI answer for \${senderJid}...\`);
           const response = await ai.models.generateContent({
             model: 'gemini-3.8-flash',
-            contents: \`Client Reply: "\${text}". Generate a polite Urdu/English sales response under 3 lines.\`,
+            contents: \`CLIENT MESSAGE: "\${text}". Detect language (Urdu/Roman Urdu vs English) and reply in the same language.\`,
           });
 
           await sock.sendMessage(senderJid, { text: response.text });
@@ -205,16 +215,16 @@ SENDER_NUMBER="${settings.senderNumber}"`,
 
     readme: `# WhatsApp Dynamic Automation System
 
-## Setup Guide
+## Features Overview & Client Deletion
+1. **Client Deletion API & Confirmation Modal**: Full backend deletion of records, AI queue items, and logs upon confirmation.
+2. **Dynamic Categories & Video Folders**: Place promotional videos inside \`media/<category_folder>/\` and configure in \`contacts.json\`.
+3. **Bilingual Gemini AI Auto-Answer**: Language detection logic for Urdu/Roman Urdu and English with a forced 5-minute delay.
 
-1. Place your promotional video files inside matching \`media/<category_folder>/\` subfolders (e.g. \`media/restaurants/promo.mp4\`).
-2. Add your client lists and custom categories dynamically into \`contacts.json\`.
-3. Run:
-   \`\`\`bash
-   npm install
-   npm start
-   \`\`\`
-4. Open \`http://localhost:3000\` to scan the Baileys QR Code and monitor campaigns!`,
+## Setup Guide
+1. Place video files in \`media/<category_folder>/\`.
+2. Add clients in \`contacts.json\`.
+3. Run \`npm install\` and \`npm start\`.
+4. Access dashboard at \`http://localhost:3000\`.`,
   };
 
   const handleCopyCode = () => {
@@ -234,12 +244,12 @@ SENDER_NUMBER="${settings.senderNumber}"`,
             </div>
             <div>
               <h2 className="text-lg font-bold text-white flex items-center gap-2">
-                Export Dynamic Code &amp; contacts.json Structure
+                Export Dynamic Code Repository &amp; Client Delete Feature
                 <span className="px-2 py-0.5 rounded text-[10px] bg-emerald-500/20 text-emerald-300 font-bold border border-emerald-500/30">
-                  Ready for VS Code &amp; GitHub
+                  Updated with Client Deletion
                 </span>
               </h2>
-              <p className="text-xs text-slate-400">Clean, non-hardcoded Node.js Baileys codebase driven by contacts.json.</p>
+              <p className="text-xs text-slate-400">Complete backend &amp; frontend logic for client deletion &amp; contacts.json.</p>
             </div>
           </div>
 

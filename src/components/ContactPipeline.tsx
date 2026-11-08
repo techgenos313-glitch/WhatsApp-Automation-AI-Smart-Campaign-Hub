@@ -13,7 +13,10 @@ import {
   Sparkles,
   ArrowLeft,
   MessageSquare,
-  ExternalLink
+  ExternalLink,
+  AlertTriangle,
+  Check,
+  X
 } from 'lucide-react';
 import { Contact, Category } from '../types';
 
@@ -21,7 +24,7 @@ interface ContactPipelineProps {
   contacts: Contact[];
   categories: Category[];
   onSaveContact: (contactData: Partial<Contact>) => void;
-  onDeleteContact: (id: string) => void;
+  onDeleteContact: (id: string) => Promise<any> | void;
   onNavigateTab: (tab: string) => void;
 }
 
@@ -35,6 +38,18 @@ export const ContactPipeline: React.FC<ContactPipelineProps> = ({
   const [searchTerm, setSearchTerm] = useState('');
   const [categoryFilter, setCategoryFilter] = useState('all');
   const [isModalOpen, setIsModalOpen] = useState(false);
+  
+  // Confirmation Modal state for deletion
+  const [clientToDelete, setClientToDelete] = useState<Contact | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
+
+  // Toast Notification state
+  const [toast, setToast] = useState<{ show: boolean; message: string; type: 'success' | 'error' }>({
+    show: false,
+    message: '',
+    type: 'success',
+  });
+
   const [formData, setFormData] = useState<Partial<Contact>>({
     name: '',
     phone: '',
@@ -42,6 +57,11 @@ export const ContactPipeline: React.FC<ContactPipelineProps> = ({
     status: 'new',
     notes: '',
   });
+
+  const triggerToast = (message: string, type: 'success' | 'error' = 'success') => {
+    setToast({ show: true, message, type });
+    setTimeout(() => setToast({ show: false, message: '', type: 'success' }), 3500);
+  };
 
   const filteredContacts = contacts.filter((c) => {
     const matchesSearch = c.name.toLowerCase().includes(searchTerm.toLowerCase()) || c.phone.includes(searchTerm);
@@ -69,6 +89,28 @@ export const ContactPipeline: React.FC<ContactPipelineProps> = ({
     e.preventDefault();
     onSaveContact(formData);
     setIsModalOpen(false);
+    triggerToast('Contact saved successfully! / کلائنٹ کامیابی سے محفوظ ہو گیا ہے۔');
+  };
+
+  const confirmDeleteAction = async () => {
+    if (!clientToDelete) return;
+    setIsDeleting(true);
+
+    try {
+      const result = await onDeleteContact(clientToDelete.id);
+      setIsDeleting(false);
+      setClientToDelete(null);
+
+      if (result && result.error) {
+        triggerToast(`❌ Error: ${result.error}`, 'error');
+      } else {
+        triggerToast(`Client '${clientToDelete.name}' deleted successfully! / کلائنٹ کامیابی سے ڈیلیٹ ہو گیا ہے۔`, 'success');
+      }
+    } catch (err) {
+      setIsDeleting(false);
+      setClientToDelete(null);
+      triggerToast('❌ Error deleting client record', 'error');
+    }
   };
 
   const getStatusBadge = (status: string) => {
@@ -87,7 +129,19 @@ export const ContactPipeline: React.FC<ContactPipelineProps> = ({
   const formatCleanPhone = (phone: string) => phone.replace(/[^0-9]/g, '');
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 relative">
+      {/* Toast Notification Banner */}
+      {toast.show && (
+        <div className={`fixed bottom-6 right-6 z-50 flex items-center gap-3 px-4 py-3 rounded-2xl shadow-2xl border transition-all animate-bounce ${
+          toast.type === 'success' 
+            ? 'bg-emerald-950 border-emerald-500/40 text-emerald-300' 
+            : 'bg-rose-950 border-rose-500/40 text-rose-300'
+        }`}>
+          {toast.type === 'success' ? <Check className="w-5 h-5 text-emerald-400 shrink-0" /> : <AlertTriangle className="w-5 h-5 text-rose-400 shrink-0" />}
+          <span className="text-xs font-semibold">{toast.message}</span>
+        </div>
+      )}
+
       {/* Explicit Back Header Navigation */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-5 rounded-2xl bg-slate-900 border border-slate-800">
         <div className="flex items-center gap-3">
@@ -99,8 +153,8 @@ export const ContactPipeline: React.FC<ContactPipelineProps> = ({
             <span>&lt; Back to Overview</span>
           </button>
           <div>
-            <h2 className="text-base font-bold text-white">Client Directory &amp; Lead Pipeline</h2>
-            <p className="text-xs text-slate-400">Call directly or open WhatsApp chat for interested leads</p>
+            <h2 className="text-base font-bold text-white">Client Directory &amp; Delete Management</h2>
+            <p className="text-xs text-slate-400">Manage, edit, or delete clients with full confirmation &amp; toast alerts</p>
           </div>
         </div>
 
@@ -146,12 +200,23 @@ export const ContactPipeline: React.FC<ContactPipelineProps> = ({
 
           return (
             <div key={contact.id} className="p-4 rounded-2xl bg-slate-900 border border-slate-800 space-y-3 shadow-md">
-              <div className="flex items-center justify-between">
+              <div className="flex items-start justify-between">
                 <div>
                   <h3 className="text-sm font-bold text-white">{contact.name}</h3>
                   <span className="text-xs font-mono text-emerald-400">{contact.phone}</span>
                 </div>
-                {getStatusBadge(contact.status)}
+                <div className="flex items-center gap-2">
+                  {getStatusBadge(contact.status)}
+                  
+                  {/* RED DELETE BUTTON ON MOBILE CARD */}
+                  <button
+                    onClick={() => setClientToDelete(contact)}
+                    className="p-1.5 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 text-rose-400 border border-rose-500/30 transition-all cursor-pointer"
+                    title="Delete Client / کلائنٹ ڈیلیٹ کریں"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                </div>
               </div>
 
               <div className="flex items-center justify-between text-xs text-slate-400 pt-2 border-t border-slate-800">
@@ -161,14 +226,14 @@ export const ContactPipeline: React.FC<ContactPipelineProps> = ({
                 <span className="font-mono text-[11px]">{contact.messagesSentToday} msgs today</span>
               </div>
 
-              {/* Direct Calling & WhatsApp Actions */}
+              {/* Actions row */}
               <div className="flex gap-2 pt-1">
                 <a
                   href={`tel:${contact.phone}`}
                   className="flex-1 flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs transition-all shadow"
                 >
                   <PhoneCall className="w-3.5 h-3.5" />
-                  <span>Call Directly</span>
+                  <span>Call</span>
                 </a>
 
                 <a
@@ -180,6 +245,13 @@ export const ContactPipeline: React.FC<ContactPipelineProps> = ({
                   <MessageSquare className="w-3.5 h-3.5 text-emerald-400" />
                   <span>WhatsApp</span>
                 </a>
+
+                <button
+                  onClick={() => handleEdit(contact)}
+                  className="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold border border-slate-700"
+                >
+                  <Edit className="w-3.5 h-3.5" />
+                </button>
               </div>
             </div>
           );
@@ -196,7 +268,7 @@ export const ContactPipeline: React.FC<ContactPipelineProps> = ({
               <th className="pb-3 px-2">Category Folder</th>
               <th className="pb-3 px-2">Sent Today</th>
               <th className="pb-3 px-2">Pipeline Status</th>
-              <th className="pb-3 px-2 text-right">Direct Actions</th>
+              <th className="pb-3 px-2 text-right">Actions</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-800/80">
@@ -244,10 +316,11 @@ export const ContactPipeline: React.FC<ContactPipelineProps> = ({
                         <Edit className="w-3.5 h-3.5" />
                       </button>
 
+                      {/* RED DELETE BUTTON ON DESKTOP ROW */}
                       <button
-                        onClick={() => onDeleteContact(contact.id)}
-                        className="p-1.5 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 transition-all cursor-pointer"
-                        title="Delete Contact"
+                        onClick={() => setClientToDelete(contact)}
+                        className="p-1.5 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 text-rose-400 border border-rose-500/30 transition-all cursor-pointer"
+                        title="Delete Client Record / کلائنٹ ڈیلیٹ کریں"
                       >
                         <Trash2 className="w-3.5 h-3.5" />
                       </button>
@@ -260,7 +333,59 @@ export const ContactPipeline: React.FC<ContactPipelineProps> = ({
         </table>
       </div>
 
-      {/* Modal */}
+      {/* CONFIRMATION MODAL FOR CLIENT DELETION (Requirement #1 & #2) */}
+      {clientToDelete && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/85 backdrop-blur-md animate-fadeIn">
+          <div className="bg-slate-900 border border-rose-500/40 rounded-3xl max-w-md w-full p-6 shadow-2xl space-y-4 relative overflow-hidden">
+            <div className="flex items-center gap-3">
+              <div className="w-12 h-12 rounded-2xl bg-rose-500/20 text-rose-400 flex items-center justify-center border border-rose-500/30 shrink-0">
+                <AlertTriangle className="w-6 h-6 animate-pulse" />
+              </div>
+              <div>
+                <h3 className="text-base font-extrabold text-white">Delete Client Record? / کلائنٹ ڈیلیٹ کریں؟</h3>
+                <p className="text-xs text-rose-400 font-semibold">Permanently delete client &amp; message history</p>
+              </div>
+            </div>
+
+            <div className="p-4 rounded-2xl bg-slate-950 border border-slate-800 space-y-2 text-xs">
+              <div className="flex justify-between items-center text-slate-300">
+                <span className="text-slate-400">Client Name:</span>
+                <span className="font-bold text-white">{clientToDelete.name}</span>
+              </div>
+              <div className="flex justify-between items-center text-slate-300">
+                <span className="text-slate-400">Phone Number:</span>
+                <span className="font-mono text-emerald-400 font-bold">{clientToDelete.phone}</span>
+              </div>
+
+              <div className="pt-2 border-t border-slate-800 text-rose-300 font-['Noto_Nastaliq_Urdu',sans-serif] text-sm text-right leading-loose">
+                کیا آپ واقعی اس کلائنٹ اور اس کی تمام ہسٹری کو ڈیلیٹ کرنا چاہتے ہیں؟ یہ عمل واپس نہیں ہو سکتا۔
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => setClientToDelete(null)}
+                disabled={isDeleting}
+                className="px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold text-xs transition-all cursor-pointer"
+              >
+                نہیں، کینسل کریں (Cancel)
+              </button>
+              <button
+                type="button"
+                onClick={confirmDeleteAction}
+                disabled={isDeleting}
+                className="px-5 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs shadow-lg shadow-rose-600/30 transition-all cursor-pointer flex items-center gap-1.5"
+              >
+                <Trash2 className="w-4 h-4" />
+                <span>{isDeleting ? 'Deleting...' : 'ہاں، ڈیلیٹ کریں (Delete Client)'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Edit / Create Modal */}
       {isModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-md animate-fadeIn">
           <div className="bg-slate-900 border border-slate-800 rounded-3xl max-w-md w-full p-6 shadow-2xl space-y-4">

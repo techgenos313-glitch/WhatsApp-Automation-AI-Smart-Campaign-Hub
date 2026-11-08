@@ -1,5 +1,3 @@
-import 'dotenv/config';
-import { createClient } from '@supabase/supabase-js';
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
@@ -9,47 +7,17 @@ import { fileURLToPath } from 'url';
 import { createServer as createViteServer } from 'vite';
 import QRCode from 'qrcode';
 import { GoogleGenAI } from '@google/genai';
-
+import { createClient } from '@supabase/supabase-js';
+import type { AppUser, UserRole, StaffPermission } from './src/types';
 dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Initialize Supabase client (crash se bachne ke liye safe)
-const supabaseUrl = process.env.SUPABASE_URL || '';
-const supabaseKey = process.env.SUPABASE_ANON_KEY || '';
-export const supabase =
-  supabaseUrl && supabaseKey ? createClient(supabaseUrl, supabaseKey) : null;
-
-if (!supabase) {
-  console.warn('⚠️ Supabase keys nahi mili, Supabase sync band hai.');
-}
-
-// Function to sync contacts to Supabase
-export async function saveContactToSupabase(category: string, name: string, phone: string) {
-  if (!supabase) return;
-  const { error } = await supabase
-    .from('contacts')
-    .insert([{ category, name, phone }]);
-
-  if (error) {
-    console.error('Error saving contact to Supabase:', error.message);
-  } else {
-    console.log('✅ Contact synced to Supabase successfully!');
-  }
-}
-
-// Function to log WhatsApp activity to Supabase
-export async function logActivityToSupabase(eventType: string, message: string, phone?: string) {
-  if (!supabase) return;
-  const { error } = await supabase
-    .from('logs')
-    .insert([{ event_type: eventType, message, phone }]);
-
-  if (error) {
-    console.error('Error logging to Supabase:', error.message);
-  }
-}
+// Initialize Supabase Client if env vars provided
+const supabaseUrl = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || '';
+const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.VITE_SUPABASE_ANON_KEY || '';
+const supabase = (supabaseUrl && supabaseKey) ? createClient(supabaseUrl, supabaseKey) : null;
 
 // Initialize Gemini AI client
 const apiKey = process.env.GEMINI_API_KEY || '';
@@ -71,10 +39,10 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-// Directories setup: data/ & media/
+// Directories setup
 const DATA_DIR = path.join(__dirname, 'data');
 const MEDIA_DIR = path.join(__dirname, 'media');
-const CONTACTS_FILE = path.join(DATA_DIR, 'contacts.json');
+const MULTI_TENANT_FILE = path.join(DATA_DIR, 'multi_tenant_db.json');
 
 if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -83,51 +51,153 @@ if (!fs.existsSync(MEDIA_DIR)) {
   fs.mkdirSync(MEDIA_DIR, { recursive: true });
 }
 
-// Default media category folders
-const defaultCategoryFolders = ['restaurants', 'hotels', 'medicines', 'realestate', 'clothing'];
-defaultCategoryFolders.forEach((folder) => {
-  const folderPath = path.join(MEDIA_DIR, folder);
-  if (!fs.existsSync(folderPath)) {
-    fs.mkdirSync(folderPath, { recursive: true });
-  }
-});
-
-// Initial contacts.json template with dynamic categories & bilingual settings
-const initialContactsJson = {
-  settings: {
-    senderNumber: '+92 300 1234567',
-    greetingPrefix: 'السلام علیکم',
-    urduFooter: 'اگر آپ اس میں انٹرسٹڈ ہیں تو مزید معلومات کے لیے اس نمبر پر رابطہ کر سکتے ہیں۔',
-    enableUrduFooter: true,
-    defaultDailyLimitPerCategory: 3,
-    minSmartDelaySec: 10,
-    maxSmartDelaySec: 30,
-    aiDelayMinutes: 5,
-    enableAiAutoAnswer: true,
-    aiSystemInstruction: `CRITICAL BILINGUAL LANGUAGE INSTRUCTION:
+// Initial Multi-Tenant Seed Database
+const initialMultiTenantDb = {
+  users: [
+    {
+      id: 'usr_super',
+      email: 'superadmin@saas.com',
+      name: 'Platform Super Admin',
+      role: 'SUPER_ADMIN' as UserRole,
+      tenantId: undefined,
+      permissions: ['view_inbox', 'send_messages', 'manage_contacts', 'manage_categories', 'view_analytics'] as StaffPermission[],
+      avatarUrl: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150',
+      createdAt: new Date().toISOString(),
+    },
+    {
+      id: 'usr_gourmet_admin',
+      email: 'admin@gourmet.com',
+      name: 'Gourmet Business Admin',
+      role: 'BUSINESS_ADMIN' as UserRole,
+      tenantId: 'tenant_default',
+      permissions: ['view_inbox', 'send_messages', 'manage_contacts', 'manage_categories', 'view_analytics'] as StaffPermission[],
+      avatarUrl: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=150',
+      createdAt: new Date().toISOString(),
+    },
+    {
+      id: 'usr_gourmet_staff',
+      email: 'staff@gourmet.com',
+      name: 'Gourmet Support Agent',
+      role: 'STAFF' as UserRole,
+      tenantId: 'tenant_default',
+      permissions: ['view_inbox', 'send_messages', 'manage_contacts'] as StaffPermission[],
+      avatarUrl: 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=150',
+      createdAt: new Date().toISOString(),
+    },
+    {
+      id: 'usr_royal_admin',
+      email: 'admin@royal.com',
+      name: 'Royal Properties Owner',
+      role: 'BUSINESS_ADMIN' as UserRole,
+      tenantId: 'tenant_realestate',
+      permissions: ['view_inbox', 'send_messages', 'manage_contacts', 'manage_categories', 'view_analytics'] as StaffPermission[],
+      avatarUrl: 'https://images.unsplash.com/photo-1500648767791-00dcc994a43e?w=150',
+      createdAt: new Date().toISOString(),
+    },
+  ] as Array<AppUser>,
+  subscriptionPlans: [
+    {
+      id: 'plan_starter',
+      name: 'Starter Business Plan',
+      priceMonthly: 29.00,
+      maxContacts: 500,
+      maxMessagesPerDay: 200,
+      maxStaffAccounts: 2,
+      allowAiAutoAnswer: true,
+      allowCustomVideos: false,
+    },
+    {
+      id: 'plan_pro',
+      name: 'Business Pro Suite',
+      priceMonthly: 79.00,
+      maxContacts: 2500,
+      maxMessagesPerDay: 1000,
+      maxStaffAccounts: 10,
+      allowAiAutoAnswer: true,
+      allowCustomVideos: true,
+    },
+    {
+      id: 'plan_enterprise',
+      name: 'Enterprise Unlimited',
+      priceMonthly: 199.00,
+      maxContacts: 10000,
+      maxMessagesPerDay: 5000,
+      maxStaffAccounts: 50,
+      allowAiAutoAnswer: true,
+      allowCustomVideos: true,
+    },
+  ],
+  subscriptions: [
+    {
+      id: 'sub_gourmet',
+      tenantId: 'tenant_default',
+      planId: 'plan_pro',
+      status: 'active' as const,
+      currentPeriodEnd: new Date(Date.now() + 30 * 86400000).toISOString(),
+      messagesSentThisMonth: 142,
+    },
+    {
+      id: 'sub_royal',
+      tenantId: 'tenant_realestate',
+      planId: 'plan_starter',
+      status: 'active' as const,
+      currentPeriodEnd: new Date(Date.now() + 30 * 86400000).toISOString(),
+      messagesSentThisMonth: 89,
+    },
+  ],
+  tenants: [
+    {
+      id: 'tenant_default',
+      name: 'Gourmet Dining & Hospitality',
+      slug: 'gourmet-dining',
+      ownerUserId: 'usr_gourmet_admin',
+      senderNumber: '+92 300 1234567',
+      urduFooter: 'اگر آپ اس میں انٹرسٹڈ ہیں تو مزید معلومات کے لیے اس نمبر پر رابطہ کر سکتے ہیں۔',
+      enableUrduFooter: true,
+      dailyLimitPerCategory: 3,
+      aiDelayMinutes: 5,
+      aiSystemInstruction: `CRITICAL BILINGUAL LANGUAGE INSTRUCTION:
 You are an AI Customer Sales & Support Assistant for WhatsApp.
 Automatically DETECT the language of the incoming client message:
-1. If the client writes in Urdu or Roman Urdu (e.g., "Salam", "Price kya hai", "Detail batayein"), reply in polite, natural Roman Urdu or Urdu text.
-2. If the client writes in English (e.g., "Hello, please provide rates and availability"), reply in concise, professional English.
-Always keep answers under 2-3 short sentences. Mention sender WhatsApp number +92 300 1234567.`,
-    supabaseUrl: '',
-    supabaseKey: '',
-    isSupabaseConnected: false,
-  },
+1. If the client writes in Urdu or Roman Urdu, reply in polite, natural Roman Urdu or Urdu text.
+2. If the client writes in English, reply in concise, professional English.
+Always keep answers under 2-3 short sentences. Mention sender WhatsApp number +92 300 1234567 for direct assistance.`,
+      subscriptionStatus: 'active' as const,
+      planId: 'plan_pro',
+      createdAt: new Date().toISOString(),
+    },
+    {
+      id: 'tenant_realestate',
+      name: 'Royal Properties & Villas',
+      slug: 'royal-properties',
+      ownerUserId: 'usr_royal_admin',
+      senderNumber: '+92 321 9876543',
+      urduFooter: 'برائے مہربانی سائٹ وزٹ اور بکنگ کے لیے رابطہ کریں۔',
+      enableUrduFooter: true,
+      dailyLimitPerCategory: 3,
+      aiDelayMinutes: 5,
+      aiSystemInstruction: `Provide professional real estate consultancy in Urdu or English matching client language.`,
+      subscriptionStatus: 'active' as const,
+      planId: 'plan_starter',
+      createdAt: new Date().toISOString(),
+    },
+  ],
   categories: [
     {
       id: 'restaurants',
+      tenantId: 'tenant_default',
       name: 'Restaurants & Dining',
       folderPath: 'media/restaurants',
       videoFile: 'restaurant_promo.mp4',
       videoUrl: 'https://assets.mixkit.co/videos/preview/mixkit-chef-cooking-food-in-a-restaurant-kitchen-40788-large.mp4',
-      captionTemplate: 'Enjoy 25% OFF our exclusive Gourmet Family Combo menu today!\n\n🍽️ Order Now: {phone}',
+      captionTemplate: 'Enjoy 25% OFF our exclusive Gourmet Family Combo menu today! Premium dining delivered to your doorstep.\n\n📱 Order Now: {phone}',
       dailyLimit: 3,
       sentToday: 1,
       color: 'amber',
     },
     {
       id: 'hotels',
+      tenantId: 'tenant_default',
       name: 'Hotels & Hospitality',
       folderPath: 'media/hotels',
       videoFile: 'hotel_suite.mp4',
@@ -139,6 +209,7 @@ Always keep answers under 2-3 short sentences. Mention sender WhatsApp number +9
     },
     {
       id: 'medicines',
+      tenantId: 'tenant_default',
       name: 'Medicines & Health',
       folderPath: 'media/medicines',
       videoFile: 'pharmacy_delivery.mp4',
@@ -149,8 +220,9 @@ Always keep answers under 2-3 short sentences. Mention sender WhatsApp number +9
       color: 'blue',
     },
     {
-      id: 'realestate',
-      name: 'Real Estate & Properties',
+      id: 'villas',
+      tenantId: 'tenant_realestate',
+      name: 'Luxury Villas & Plots',
       folderPath: 'media/realestate',
       videoFile: 'villas_tour.mp4',
       videoUrl: 'https://assets.mixkit.co/videos/preview/mixkit-real-estate-agent-showing-a-house-model-41539-large.mp4',
@@ -159,21 +231,11 @@ Always keep answers under 2-3 short sentences. Mention sender WhatsApp number +9
       sentToday: 0,
       color: 'purple',
     },
-    {
-      id: 'clothing',
-      name: 'Clothing & Fashion',
-      folderPath: 'media/clothing',
-      videoFile: 'fashion_collection.mp4',
-      videoUrl: 'https://assets.mixkit.co/videos/preview/mixkit-woman-holding-shopping-bags-41530-large.mp4',
-      captionTemplate: 'Discover our new designer summer lawn collection with flat 20% launch discount!\n\n👗 Catalog: {phone}',
-      dailyLimit: 3,
-      sentToday: 0,
-      color: 'rose',
-    },
   ],
   clients: [
     {
       id: 'cnt_1',
+      tenantId: 'tenant_default',
       name: 'Muhammad Ali',
       phone: '+92 301 5551234',
       category: 'restaurants',
@@ -185,6 +247,7 @@ Always keep answers under 2-3 short sentences. Mention sender WhatsApp number +9
     },
     {
       id: 'cnt_2',
+      tenantId: 'tenant_default',
       name: 'Tariq Mahmood',
       phone: '+92 321 4445566',
       category: 'hotels',
@@ -196,6 +259,7 @@ Always keep answers under 2-3 short sentences. Mention sender WhatsApp number +9
     },
     {
       id: 'cnt_3',
+      tenantId: 'tenant_default',
       name: 'Dr. Fatima Zahra',
       phone: '+92 333 7778899',
       category: 'medicines',
@@ -207,125 +271,503 @@ Always keep answers under 2-3 short sentences. Mention sender WhatsApp number +9
     },
     {
       id: 'cnt_4',
+      tenantId: 'tenant_realestate',
       name: 'Usman Khan',
       phone: '+92 300 9991122',
-      category: 'realestate',
+      category: 'villas',
       notes: 'Plot Inquiry',
       status: 'new',
       messagesSentToday: 0,
       createdAt: new Date().toISOString(),
     },
-    {
-      id: 'cnt_5',
-      name: 'John Smith',
-      phone: '+1 555 0192834',
-      category: 'hotels',
-      notes: 'International Tourist',
-      status: 'new',
-      messagesSentToday: 0,
-      createdAt: new Date().toISOString(),
-    },
-  ],
+  ] as Array<any>,
   messages: [
     {
       id: 'msg_1',
+      tenantId: 'tenant_default',
       contactId: 'cnt_1',
       contactName: 'Muhammad Ali',
       contactPhone: '+92 301 5551234',
       category: 'restaurants',
-      direction: 'outgoing' as const,
+      direction: 'outgoing',
       content: 'السلام علیکم Muhammad Ali,\n\nEnjoy 25% OFF our exclusive Gourmet Family Combo menu today!\n\nاگر آپ اس میں انٹرسٹڈ ہیں تو مزید معلومات کے لیے اس نمبر پر رابطہ کر سکتے ہیں۔ (+92 300 1234567)',
       videoUrl: 'https://assets.mixkit.co/videos/preview/mixkit-chef-cooking-food-in-a-restaurant-kitchen-40788-large.mp4',
       footerText: 'اگر آپ اس میں انٹرسٹڈ ہیں تو مزید معلومات کے لیے اس نمبر پر رابطہ کر سکتے ہیں۔',
-      status: 'delivered' as const,
+      status: 'delivered',
       timestamp: new Date(Date.now() - 3600000).toISOString(),
       isAiGenerated: false,
     },
+  ] as Array<any>,
+  campaigns: [
     {
-      id: 'msg_2',
-      contactId: 'cnt_1',
-      contactName: 'Muhammad Ali',
-      contactPhone: '+92 301 5551234',
-      category: 'restaurants',
-      direction: 'incoming' as const,
-      content: 'Kya aap home delivery karte hain or Deals me kya shamil hai?',
-      videoUrl: '',
-      footerText: '',
-      status: 'read' as const,
-      timestamp: new Date(Date.now() - 3300000).toISOString(),
-      isAiGenerated: false,
+      id: 'cmp_1',
+      tenantId: 'tenant_default',
+      title: 'Weekend Gourmet Family Discount',
+      categoryId: 'restaurants',
+      targetCount: 15,
+      sentCount: 12,
+      status: 'completed' as const,
+      scheduledAt: new Date(Date.now() - 86400000).toISOString(),
+      createdAt: new Date(Date.now() - 172800000).toISOString(),
     },
-  ],
+  ] as Array<any>,
+  auditLogs: [
+    {
+      id: 'log_1',
+      tenantId: 'tenant_default',
+      userId: 'usr_gourmet_admin',
+      userEmail: 'admin@gourmet.com',
+      action: 'TENANT_INIT',
+      details: 'Gourmet Business initialized on SaaS multi-tenant platform',
+      timestamp: new Date(Date.now() - 3600000).toISOString(),
+    },
+  ] as Array<any>,
   aiQueue: [] as Array<any>,
-  connection: {
-    status: 'connected',
-    phoneNumber: '+92 300 1234567',
-    deviceInfo: 'WhatsApp Web / Baileys Node.js Engine (Linux)',
-    qrCodeDataUrl: '',
-    qrCodeRaw: '',
-    connectedAt: new Date(Date.now() - 86400000).toISOString(),
+  connections: {
+    tenant_default: {
+      status: 'connected',
+      phoneNumber: '+92 300 1234567',
+      deviceInfo: 'Baileys Multi-Tenant Socket (Gourmet)',
+      qrCodeDataUrl: '',
+      qrCodeRaw: '',
+      connectedAt: new Date(Date.now() - 86400000).toISOString(),
+    },
+    tenant_realestate: {
+      status: 'connected',
+      phoneNumber: '+92 321 9876543',
+      deviceInfo: 'Baileys Multi-Tenant Socket (Royal)',
+      qrCodeDataUrl: '',
+      qrCodeRaw: '',
+      connectedAt: new Date(Date.now() - 86400000).toISOString(),
+    },
+  } as Record<string, any>,
+  settings: {
+    senderNumber: '+92 300 1234567',
+    greetingPrefix: 'السلام علیکم',
+    urduFooter: 'اگر آپ اس میں انٹرسٹڈ ہیں تو مزید معلومات کے لیے اس نمبر پر رابطہ کر سکتے ہیں۔',
+    enableUrduFooter: true,
+    defaultDailyLimitPerCategory: 3,
+    minSmartDelaySec: 10,
+    maxSmartDelaySec: 30,
+    aiDelayMinutes: 5,
+    enableAiAutoAnswer: true,
+    aiSystemInstruction: `CRITICAL BILINGUAL LANGUAGE INSTRUCTION:
+Detect language (Urdu/English) and reply concisely.`,
+    supabaseUrl: '',
+    supabaseKey: '',
+    isSupabaseConnected: false,
   },
 };
 
-// Load contacts.json
-let store = initialContactsJson;
-if (!fs.existsSync(CONTACTS_FILE)) {
-  fs.writeFileSync(CONTACTS_FILE, JSON.stringify(initialContactsJson, null, 2));
+// Persistent Storage Management
+let db = initialMultiTenantDb;
+if (!fs.existsSync(MULTI_TENANT_FILE)) {
+  fs.writeFileSync(MULTI_TENANT_FILE, JSON.stringify(initialMultiTenantDb, null, 2));
 } else {
   try {
-    const raw = fs.readFileSync(CONTACTS_FILE, 'utf-8');
-    store = { ...initialContactsJson, ...JSON.parse(raw) };
+    const raw = fs.readFileSync(MULTI_TENANT_FILE, 'utf-8');
+    db = { ...initialMultiTenantDb, ...JSON.parse(raw) };
   } catch (err) {
-    console.error('Error reading contacts.json:', err);
+    console.error('Error reading multi_tenant_db.json:', err);
   }
 }
 
-function saveContactsJson() {
+function saveDb() {
   try {
-    fs.writeFileSync(CONTACTS_FILE, JSON.stringify(store, null, 2));
+    fs.writeFileSync(MULTI_TENANT_FILE, JSON.stringify(db, null, 2));
   } catch (err) {
-    console.error('Failed to write contacts.json:', err);
+    console.error('Failed to write multi_tenant_db.json:', err);
   }
 }
 
-// Generate QR Code Data URL
-async function refreshQrCode() {
-  const qrString = `2@WA_BAILEYS_AUTH:${Math.random().toString(36).substring(2, 15)}:${Date.now()}`;
+function logAudit(tenantId: string | undefined, userId: string, userEmail: string, action: string, details: string) {
+  const newLog = {
+    id: `log_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+    tenantId,
+    userId,
+    userEmail,
+    action,
+    details,
+    timestamp: new Date().toISOString(),
+  };
+  if (!db.auditLogs) db.auditLogs = [];
+  db.auditLogs.unshift(newLog);
+  if (db.auditLogs.length > 250) db.auditLogs.pop();
+  saveDb();
+}
+
+// Generate Tenant-Specific QR Code
+async function refreshTenantQrCode(tenantId: string) {
+  const qrString = `2@WA_BAILEYS_AUTH:${tenantId}:${Math.random().toString(36).substring(2, 15)}:${Date.now()}`;
   try {
     const dataUrl = await QRCode.toDataURL(qrString, { margin: 2, scale: 6 });
-    store.connection.qrCodeRaw = qrString;
-    store.connection.qrCodeDataUrl = dataUrl;
+    if (!db.connections[tenantId]) {
+      db.connections[tenantId] = {
+        status: 'qr_ready',
+        phoneNumber: '+92 300 1234567',
+        deviceInfo: `Baileys Socket (${tenantId})`,
+        qrCodeDataUrl: '',
+        qrCodeRaw: '',
+      };
+    }
+    db.connections[tenantId].qrCodeRaw = qrString;
+    db.connections[tenantId].qrCodeDataUrl = dataUrl;
+    db.connections[tenantId].status = 'qr_ready';
   } catch (err) {
-    console.error('Error generating QR code:', err);
+    console.error('Error generating tenant QR code:', err);
   }
 }
 
-refreshQrCode();
+refreshTenantQrCode('tenant_default');
+refreshTenantQrCode('tenant_realestate');
 
-// Personalized Message Builder with "السلام علیکم [Name]" and Urdu Footer
-function buildPersonalizedMessage(clientName: string, category: any, customFooter?: string) {
-  const greeting = `${store.settings.greetingPrefix} ${clientName},\n\n`;
-  const caption = category.captionTemplate
-    .replace('{name}', clientName)
-    .replace('{phone}', store.settings.senderNumber);
-
-  const footer = customFooter !== undefined
-    ? customFooter
-    : (store.settings.enableUrduFooter ? store.settings.urduFooter : '');
-
-  let fullMsg = greeting + caption;
-  if (footer) {
-    fullMsg += `\n\n${footer} (${store.settings.senderNumber})`;
+// Authentication & Tenant Resolution Middleware
+declare global {
+  namespace Express {
+    interface Request {
+      user?: AppUser;
+    }
   }
-  return fullMsg;
+}
+
+function authenticateUser(req: express.Request, res: express.Response, next: express.NextFunction) {
+  const authHeader = req.headers.authorization || '';
+  const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : (req.headers['x-auth-token'] as string);
+  const emailHeader = req.headers['x-user-email'] as string;
+  const roleHeader = req.headers['x-user-role'] as string;
+
+  let matchedUser: AppUser | undefined = undefined;
+
+  if (token) {
+    matchedUser = db.users.find((u) => u.id === token || u.email === token);
+  }
+  if (!matchedUser && emailHeader) {
+    matchedUser = db.users.find((u) => u.email.toLowerCase() === emailHeader.toLowerCase());
+  }
+  if (!matchedUser && roleHeader) {
+    matchedUser = db.users.find((u) => u.role === roleHeader);
+  }
+
+  // Fallback default user for dev testing
+  if (!matchedUser) {
+    matchedUser = db.users[1]; // Gourmet Business Admin
+  }
+
+  req.user = matchedUser;
+  next();
+}
+
+app.use(authenticateUser);
+
+function getTenantId(req: express.Request): string {
+  const user = req.user;
+  if (user && user.role !== 'SUPER_ADMIN' && user.tenantId) {
+    // STRICT ISOLATION: Business Admin & Staff MUST stay in their assigned tenant
+    return user.tenantId;
+  }
+
+  // Super Admin can switch active tenant context via header or query
+  const tenantHeader = req.headers['x-tenant-id'] as string;
+  const tenantQuery = req.query.tenantId as string;
+  const targetId = tenantHeader || tenantQuery || (user?.tenantId || 'tenant_default');
+  const tenantExists = db.tenants.some((t) => t.id === targetId);
+  return tenantExists ? targetId : 'tenant_default';
+}
+
+function requireRole(...allowedRoles: UserRole[]) {
+  return (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (!req.user || !allowedRoles.includes(req.user.role)) {
+      return res.status(403).json({ error: `Access Denied: Requires ${allowedRoles.join(' or ')} role.` });
+    }
+    next();
+  };
+}
+
+function requirePermission(permission: StaffPermission) {
+  return (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+    if (req.user.role === 'SUPER_ADMIN' || req.user.role === 'BUSINESS_ADMIN') return next();
+    if (req.user.permissions && req.user.permissions.includes(permission)) return next();
+    return res.status(403).json({ error: `Access Denied: Missing required permission '${permission}'.` });
+  };
 }
 
 // REST APIs
 
+// AUTH ENDPOINTS
+app.get('/api/auth/me', (req, res) => {
+  const user = req.user!;
+  const tenantId = getTenantId(req);
+  const activeTenant = db.tenants.find((t) => t.id === tenantId) || db.tenants[0];
+  const activeSub = db.subscriptions.find((s) => s.tenantId === tenantId);
+  const activePlan = db.subscriptionPlans.find((p) => p.id === (activeSub?.planId || activeTenant?.planId || 'plan_pro'));
+
+  res.json({
+    success: true,
+    user,
+    allUsers: user.role === 'SUPER_ADMIN' ? db.users : db.users.filter((u) => u.tenantId === user.tenantId),
+    activeTenant,
+    subscription: activeSub,
+    plan: activePlan,
+    plans: db.subscriptionPlans,
+  });
+});
+
+app.post('/api/auth/login', (req, res) => {
+  const { email, role } = req.body;
+  let targetUser: AppUser | undefined;
+
+  if (email) {
+    targetUser = db.users.find((u) => u.email.toLowerCase() === email.toLowerCase());
+  } else if (role) {
+    targetUser = db.users.find((u) => u.role === role);
+  }
+
+  if (!targetUser) {
+    return res.status(401).json({ error: 'Invalid user credentials or user not found' });
+  }
+
+  logAudit(targetUser.tenantId, targetUser.id, targetUser.email, 'LOGIN', `User ${targetUser.email} logged in with role ${targetUser.role}`);
+
+  res.json({
+    success: true,
+    user: targetUser,
+    token: targetUser.id,
+  });
+});
+
+app.post('/api/auth/switch-user', requireRole('SUPER_ADMIN'), (req, res) => {
+  const { userId } = req.body;
+  const user = db.users.find((u) => u.id === userId);
+  if (!user) return res.status(404).json({ error: 'User account not found' });
+
+  logAudit(user.tenantId, user.id, user.email, 'USER_SWITCH', `Super Admin switched session to user ${user.email} (${user.role})`);
+  res.json({ success: true, user, token: user.id });
+});
+
+// TENANT ENDPOINTS (Strict isolation & Super Admin controls)
+app.get('/api/tenants', (req, res) => {
+  const user = req.user!;
+  if (user.role === 'SUPER_ADMIN') {
+    return res.json({ success: true, tenants: db.tenants });
+  }
+  // Business Admin & Staff see ONLY their tenant
+  const userTenants = db.tenants.filter((t) => t.id === user.tenantId);
+  res.json({ success: true, tenants: userTenants });
+});
+
+app.post('/api/tenants', requireRole('SUPER_ADMIN', 'BUSINESS_ADMIN'), (req, res) => {
+  const { name, slug, senderNumber, urduFooter, planId } = req.body;
+  if (!name) return res.status(400).json({ error: 'Organization name is required' });
+
+  const tenantId = `tenant_${Date.now()}`;
+  const ownerUserId = `usr_owner_${Date.now()}`;
+  const selectedPlan = planId || 'plan_pro';
+
+  const newTenant = {
+    id: tenantId,
+    name,
+    slug: slug || name.toLowerCase().replace(/[^a-z0-9]/g, '-'),
+    ownerUserId,
+    senderNumber: senderNumber || '+92 300 1234567',
+    urduFooter: urduFooter || 'اگر آپ اس میں انٹرسٹڈ ہیں تو مزید معلومات کے لیے اس نمبر پر رابطہ کر سکتے ہیں۔',
+    enableUrduFooter: true,
+    dailyLimitPerCategory: 3,
+    aiDelayMinutes: 5,
+    aiSystemInstruction: `Auto detect Urdu / English language and reply politely.`,
+    subscriptionStatus: 'active' as const,
+    planId: selectedPlan,
+    createdAt: new Date().toISOString(),
+  };
+
+  db.tenants.push(newTenant);
+  db.subscriptions.push({
+    id: `sub_${Date.now()}`,
+    tenantId,
+    planId: selectedPlan,
+    status: 'active',
+    currentPeriodEnd: new Date(Date.now() + 30 * 86400000).toISOString(),
+    messagesSentThisMonth: 0,
+  });
+
+  db.connections[tenantId] = {
+    status: 'connected',
+    phoneNumber: newTenant.senderNumber,
+    deviceInfo: `Baileys Socket (${newTenant.name})`,
+    qrCodeDataUrl: '',
+    qrCodeRaw: '',
+    connectedAt: new Date().toISOString(),
+  };
+
+  logAudit(tenantId, req.user!.id, req.user!.email, 'CREATE_TENANT', `Created organization '${newTenant.name}'`);
+
+  saveDb();
+  res.json({ success: true, tenant: newTenant, tenants: db.tenants });
+});
+
+// STAFF & USER MANAGEMENT
+app.get('/api/users', requireRole('SUPER_ADMIN', 'BUSINESS_ADMIN'), (req, res) => {
+  const user = req.user!;
+  if (user.role === 'SUPER_ADMIN') {
+    return res.json({ success: true, users: db.users });
+  }
+  const tenantUsers = db.users.filter((u) => u.tenantId === user.tenantId);
+  res.json({ success: true, users: tenantUsers });
+});
+
+app.post('/api/users', requireRole('SUPER_ADMIN', 'BUSINESS_ADMIN'), (req, res) => {
+  const currentUser = req.user!;
+  const { name, email, role, permissions } = req.body;
+  if (!name || !email) return res.status(400).json({ error: 'Name and email are required' });
+
+  const tenantId = currentUser.role === 'SUPER_ADMIN' ? (req.body.tenantId || 'tenant_default') : currentUser.tenantId;
+
+  // Enforce Subscription Plan Limit on Staff Accounts
+  const activeSub = db.subscriptions.find((s) => s.tenantId === tenantId);
+  const activePlan = db.subscriptionPlans.find((p) => p.id === (activeSub?.planId || 'plan_pro')) || db.subscriptionPlans[0];
+  const existingTenantUsersCount = db.users.filter((u) => u.tenantId === tenantId).length;
+
+  if (existingTenantUsersCount >= activePlan.maxStaffAccounts && currentUser.role !== 'SUPER_ADMIN') {
+    return res.status(403).json({
+      error: `Subscription Limit Reached: Current plan '${activePlan.name}' allows maximum ${activePlan.maxStaffAccounts} staff accounts. Please upgrade plan.`,
+    });
+  }
+
+  const newUser: AppUser = {
+    id: `usr_${Date.now()}`,
+    name,
+    email,
+    role: role || 'STAFF',
+    tenantId,
+    permissions: permissions || ['view_inbox', 'send_messages', 'manage_contacts'],
+    createdAt: new Date().toISOString(),
+  };
+
+  db.users.push(newUser);
+  logAudit(tenantId, currentUser.id, currentUser.email, 'ADD_STAFF', `Added staff user ${newUser.email} with role ${newUser.role}`);
+  saveDb();
+
+  const userList = currentUser.role === 'SUPER_ADMIN' ? db.users : db.users.filter((u) => u.tenantId === currentUser.tenantId);
+  res.json({ success: true, user: newUser, users: userList });
+});
+
+app.delete('/api/users/:id', requireRole('SUPER_ADMIN', 'BUSINESS_ADMIN'), (req, res) => {
+  const currentUser = req.user!;
+  const targetId = req.params.id;
+
+  const targetUser = db.users.find((u) => u.id === targetId);
+  if (!targetUser) return res.status(404).json({ error: 'User not found' });
+
+  if (currentUser.role !== 'SUPER_ADMIN' && targetUser.tenantId !== currentUser.tenantId) {
+    return res.status(403).json({ error: 'Forbidden: Cannot delete user of another organization' });
+  }
+
+  db.users = db.users.filter((u) => u.id !== targetId);
+  logAudit(currentUser.tenantId, currentUser.id, currentUser.email, 'DELETE_STAFF', `Removed staff user ${targetUser.email}`);
+  saveDb();
+
+  const userList = currentUser.role === 'SUPER_ADMIN' ? db.users : db.users.filter((u) => u.tenantId === currentUser.tenantId);
+  res.json({ success: true, users: userList });
+});
+
+// SUBSCRIPTION PLANS & BILLING
+app.get('/api/plans', (req, res) => {
+  res.json({ success: true, plans: db.subscriptionPlans });
+});
+
+app.get('/api/subscriptions', requireRole('SUPER_ADMIN', 'BUSINESS_ADMIN'), (req, res) => {
+  const user = req.user!;
+  if (user.role === 'SUPER_ADMIN') {
+    return res.json({ success: true, subscriptions: db.subscriptions, plans: db.subscriptionPlans });
+  }
+  const sub = db.subscriptions.find((s) => s.tenantId === user.tenantId);
+  const plan = db.subscriptionPlans.find((p) => p.id === sub?.planId);
+  res.json({ success: true, subscription: sub, plan, plans: db.subscriptionPlans });
+});
+
+app.post('/api/subscriptions/upgrade', requireRole('SUPER_ADMIN', 'BUSINESS_ADMIN'), (req, res) => {
+  const tenantId = getTenantId(req);
+  const { planId } = req.body;
+
+  const targetPlan = db.subscriptionPlans.find((p) => p.id === planId);
+  if (!targetPlan) return res.status(404).json({ error: 'Selected plan not found' });
+
+  let sub = db.subscriptions.find((s) => s.tenantId === tenantId);
+  if (sub) {
+    sub.planId = planId;
+    sub.status = 'active';
+  } else {
+    sub = {
+      id: `sub_${Date.now()}`,
+      tenantId,
+      planId,
+      status: 'active',
+      currentPeriodEnd: new Date(Date.now() + 30 * 86400000).toISOString(),
+      messagesSentThisMonth: 0,
+    };
+    db.subscriptions.push(sub);
+  }
+
+  const tenantIdx = db.tenants.findIndex((t) => t.id === tenantId);
+  if (tenantIdx !== -1) db.tenants[tenantIdx].planId = planId;
+
+  logAudit(tenantId, req.user!.id, req.user!.email, 'PLAN_UPGRADE', `Upgraded subscription to ${targetPlan.name}`);
+  saveDb();
+
+  res.json({ success: true, subscription: sub, plan: targetPlan });
+});
+
+// AUDIT LOGS
+app.get('/api/audit-logs', requireRole('SUPER_ADMIN', 'BUSINESS_ADMIN'), (req, res) => {
+  const user = req.user!;
+  if (user.role === 'SUPER_ADMIN') {
+    return res.json({ success: true, auditLogs: db.auditLogs || [] });
+  }
+  const tenantLogs = (db.auditLogs || []).filter((l) => l.tenantId === user.tenantId);
+  res.json({ success: true, auditLogs: tenantLogs });
+});
+
+// CAMPAIGNS
+app.get('/api/campaigns', requirePermission('send_messages'), (req, res) => {
+  const tenantId = getTenantId(req);
+  const tenantCampaigns = (db.campaigns || []).filter((c) => c.tenantId === tenantId);
+  res.json({ success: true, campaigns: tenantCampaigns });
+});
+
+app.post('/api/campaigns', requirePermission('send_messages'), (req, res) => {
+  const tenantId = getTenantId(req);
+  const { title, categoryId, targetCount } = req.body;
+
+  const newCampaign = {
+    id: `cmp_${Date.now()}`,
+    tenantId,
+    title: title || 'New WhatsApp Broadcast',
+    categoryId: categoryId || 'restaurants',
+    targetCount: targetCount || 10,
+    sentCount: 0,
+    status: 'scheduled' as const,
+    scheduledAt: new Date().toISOString(),
+    createdAt: new Date().toISOString(),
+  };
+
+  if (!db.campaigns) db.campaigns = [];
+  db.campaigns.unshift(newCampaign);
+  logAudit(tenantId, req.user!.id, req.user!.email, 'CREATE_CAMPAIGN', `Created campaign '${newCampaign.title}'`);
+  saveDb();
+
+  const tenantCampaigns = db.campaigns.filter((c) => c.tenantId === tenantId);
+  res.json({ success: true, campaign: newCampaign, campaigns: tenantCampaigns });
+});
+
+// GET /api/state - Scoped State per Authenticated Tenant & User Permissions
 app.get('/api/state', (req, res) => {
+  const user = req.user!;
+  const tenantId = getTenantId(req);
+  const activeTenant = db.tenants.find((t) => t.id === tenantId) || db.tenants[0];
+
   const now = Date.now();
-  store.aiQueue = store.aiQueue.map((item) => {
-    if (item.status === 'waiting') {
+  db.aiQueue = db.aiQueue.map((item) => {
+    if (item.tenantId === tenantId && item.status === 'waiting') {
       const leftSec = Math.max(0, Math.ceil((item.scheduledTime - now) / 1000));
       return {
         ...item,
@@ -336,154 +778,225 @@ app.get('/api/state', (req, res) => {
     return item;
   });
 
+  const tenantCategories = db.categories.filter((c) => c.tenantId === tenantId || !c.tenantId);
+  const tenantClients = db.clients.filter((c) => c.tenantId === tenantId || !c.tenantId);
+  const tenantMessages = db.messages.filter((m) => m.tenantId === tenantId || !m.tenantId);
+  const tenantAiQueue = db.aiQueue.filter((q) => q.tenantId === tenantId || !q.tenantId);
+  const tenantConn = db.connections[tenantId] || {
+    status: 'connected',
+    phoneNumber: activeTenant.senderNumber,
+    deviceInfo: 'Baileys Socket',
+    qrCodeDataUrl: '',
+    qrCodeRaw: '',
+  };
+
+  const activeSub = db.subscriptions.find((s) => s.tenantId === tenantId);
+  const activePlan = db.subscriptionPlans.find((p) => p.id === (activeSub?.planId || activeTenant?.planId || 'plan_pro'));
+
   res.json({
-    ...store,
-    contacts: store.clients,
+    user,
+    allUsers: user.role === 'SUPER_ADMIN' ? db.users : db.users.filter((u) => u.tenantId === tenantId),
+    activeTenant,
+    tenants: user.role === 'SUPER_ADMIN' ? db.tenants : db.tenants.filter((t) => t.id === tenantId),
+    categories: tenantCategories,
+    contacts: tenantClients,
+    messages: tenantMessages,
+    aiQueue: tenantAiQueue,
+    campaigns: (db.campaigns || []).filter((c) => c.tenantId === tenantId),
+    auditLogs: user.role === 'SUPER_ADMIN' ? (db.auditLogs || []) : (db.auditLogs || []).filter((l) => l.tenantId === tenantId),
+    subscription: activeSub,
+    plan: activePlan,
+    plans: db.subscriptionPlans,
+    connection: tenantConn,
+    settings: {
+      senderNumber: activeTenant.senderNumber,
+      greetingPrefix: 'السلام علیکم',
+      urduFooter: activeTenant.urduFooter,
+      enableUrduFooter: activeTenant.enableUrduFooter,
+      defaultDailyLimitPerCategory: activeTenant.dailyLimitPerCategory,
+      minSmartDelaySec: 10,
+      maxSmartDelaySec: 30,
+      aiDelayMinutes: activeTenant.aiDelayMinutes,
+      enableAiAutoAnswer: true,
+      aiSystemInstruction: activeTenant.aiSystemInstruction,
+      supabaseUrl: supabaseUrl || '',
+      supabaseKey: '',
+      isSupabaseConnected: !!supabase,
+    },
   });
 });
 
-app.get('/api/contacts-json', (req, res) => {
-  res.json(store);
+app.post('/api/connection/qr', requireRole('SUPER_ADMIN', 'BUSINESS_ADMIN'), async (req, res) => {
+  const tenantId = getTenantId(req);
+  await refreshTenantQrCode(tenantId);
+  saveDb();
+  res.json({ success: true, connection: db.connections[tenantId] });
 });
 
-app.post('/api/contacts-json', (req, res) => {
-  try {
-    const updatedStore = req.body;
-    if (!updatedStore.categories || !updatedStore.clients) {
-      return res.status(400).json({ error: 'Invalid JSON format. Categories and clients arrays are required.' });
-    }
-    store = { ...store, ...updatedStore };
-    saveContactsJson();
-    res.json({ success: true, store });
-  } catch (err) {
-    res.status(500).json({ error: 'Failed to update contacts.json' });
-  }
-});
-
-app.post('/api/connection/qr', async (req, res) => {
-  store.connection.status = 'qr_ready';
-  await refreshQrCode();
-  saveContactsJson();
-  res.json({ success: true, connection: store.connection });
-});
-
-app.post('/api/connection/connect', (req, res) => {
+app.post('/api/connection/connect', requireRole('SUPER_ADMIN', 'BUSINESS_ADMIN'), (req, res) => {
+  const tenantId = getTenantId(req);
   const { phoneNumber } = req.body;
-  store.connection.status = 'connected';
-  if (phoneNumber) store.connection.phoneNumber = phoneNumber;
-  store.connection.connectedAt = new Date().toISOString();
-  saveContactsJson();
-  res.json({ success: true, connection: store.connection });
-});
-
-app.post('/api/connection/disconnect', (req, res) => {
-  store.connection.status = 'disconnected';
-  saveContactsJson();
-  res.json({ success: true, connection: store.connection });
-});
-
-app.post('/api/categories', (req, res) => {
-  const { id, name, folderPath, videoFile, videoUrl, captionTemplate, dailyLimit, color } = req.body;
-  const categoryId = id || name.toLowerCase().replace(/[^a-z0-9]/g, '_');
-  const targetFolder = folderPath || `media/${categoryId}`;
-  const absoluteFolderPath = path.join(__dirname, targetFolder);
-
-  if (!fs.existsSync(absoluteFolderPath)) {
-    fs.mkdirSync(absoluteFolderPath, { recursive: true });
+  if (!db.connections[tenantId]) {
+    db.connections[tenantId] = { status: 'connected', phoneNumber: phoneNumber || '+92 300 1234567', deviceInfo: 'Baileys Socket', qrCodeDataUrl: '', qrCodeRaw: '' };
   }
+  db.connections[tenantId].status = 'connected';
+  if (phoneNumber) db.connections[tenantId].phoneNumber = phoneNumber;
+  db.connections[tenantId].connectedAt = new Date().toISOString();
 
-  const existingIdx = store.categories.findIndex((c) => c.id === categoryId || c.id === id);
+  logAudit(tenantId, req.user!.id, req.user!.email, 'WHATSAPP_CONNECT', `Connected Baileys WhatsApp socket for tenant ${tenantId}`);
+  saveDb();
+  res.json({ success: true, connection: db.connections[tenantId] });
+});
+
+app.post('/api/connection/disconnect', requireRole('SUPER_ADMIN', 'BUSINESS_ADMIN'), (req, res) => {
+  const tenantId = getTenantId(req);
+  if (db.connections[tenantId]) {
+    db.connections[tenantId].status = 'disconnected';
+  }
+  logAudit(tenantId, req.user!.id, req.user!.email, 'WHATSAPP_DISCONNECT', `Disconnected WhatsApp session for tenant ${tenantId}`);
+  saveDb();
+  res.json({ success: true, connection: db.connections[tenantId] });
+});
+
+app.post('/api/categories', requirePermission('manage_categories'), (req, res) => {
+  const tenantId = getTenantId(req);
+  const { id, name, folderPath, videoFile, videoUrl, captionTemplate, dailyLimit, color } = req.body;
+  const categoryId = id || `cat_${Date.now()}`;
+
+  const existingIdx = db.categories.findIndex((c) => c.id === categoryId && c.tenantId === tenantId);
 
   if (existingIdx !== -1) {
-    store.categories[existingIdx] = {
-      ...store.categories[existingIdx],
-      name: name || store.categories[existingIdx].name,
-      folderPath: targetFolder,
-      videoFile: videoFile || store.categories[existingIdx].videoFile,
-      videoUrl: videoUrl || store.categories[existingIdx].videoUrl,
-      captionTemplate: captionTemplate || store.categories[existingIdx].captionTemplate,
-      dailyLimit: dailyLimit ?? store.categories[existingIdx].dailyLimit,
-      color: color || store.categories[existingIdx].color,
+    db.categories[existingIdx] = {
+      ...db.categories[existingIdx],
+      name: name || db.categories[existingIdx].name,
+      folderPath: folderPath || db.categories[existingIdx].folderPath,
+      videoFile: videoFile || db.categories[existingIdx].videoFile,
+      videoUrl: videoUrl || db.categories[existingIdx].videoUrl,
+      captionTemplate: captionTemplate || db.categories[existingIdx].captionTemplate,
+      dailyLimit: dailyLimit ?? db.categories[existingIdx].dailyLimit,
+      color: color || db.categories[existingIdx].color,
     };
   } else {
     const newCategory = {
       id: categoryId,
+      tenantId,
       name: name || 'New Field',
-      folderPath: targetFolder,
+      folderPath: folderPath || `media/${categoryId}`,
       videoFile: videoFile || 'promo_video.mp4',
       videoUrl: videoUrl || 'https://assets.mixkit.co/videos/preview/mixkit-chef-cooking-food-in-a-restaurant-kitchen-40788-large.mp4',
-      captionTemplate: captionTemplate || 'Check out our latest offer for {name}!\n\nContact: {phone}',
+      captionTemplate: captionTemplate || 'Check out our offer for {name}!\n\nContact: {phone}',
       dailyLimit: dailyLimit || 3,
       sentToday: 0,
       color: color || 'emerald',
     };
-    store.categories.push(newCategory);
+    db.categories.push(newCategory);
   }
 
-  saveContactsJson();
-  res.json({ success: true, categories: store.categories });
+  saveDb();
+  const tenantCategories = db.categories.filter((c) => c.tenantId === tenantId);
+  res.json({ success: true, categories: tenantCategories });
 });
 
-app.delete('/api/categories/:id', (req, res) => {
+app.delete('/api/categories/:id', requirePermission('manage_categories'), (req, res) => {
+  const tenantId = getTenantId(req);
   const { id } = req.params;
-  store.categories = store.categories.filter((c) => c.id !== id);
-  saveContactsJson();
-  res.json({ success: true, categories: store.categories });
+  db.categories = db.categories.filter((c) => !(c.id === id && c.tenantId === tenantId));
+  saveDb();
+  const tenantCategories = db.categories.filter((c) => c.tenantId === tenantId);
+  res.json({ success: true, categories: tenantCategories });
 });
 
-app.post('/api/contacts', (req, res) => {
+app.post('/api/contacts', requirePermission('manage_contacts'), (req, res) => {
+  const tenantId = getTenantId(req);
   const { id, name, phone, category, notes, status } = req.body;
   if (!name || !phone) {
     return res.status(400).json({ error: 'Name and phone are required' });
   }
 
   if (id) {
-    const idx = store.clients.findIndex((c) => c.id === id);
+    const idx = db.clients.findIndex((c) => c.id === id && c.tenantId === tenantId);
     if (idx !== -1) {
-      store.clients[idx] = {
-        ...store.clients[idx],
+      db.clients[idx] = {
+        ...db.clients[idx],
         name,
         phone,
-        category: category || store.clients[idx].category,
-        notes: notes !== undefined ? notes : store.clients[idx].notes,
-        status: status || store.clients[idx].status,
+        category: category || db.clients[idx].category,
+        notes: notes !== undefined ? notes : db.clients[idx].notes,
+        status: status || db.clients[idx].status,
       };
-      saveContactToSupabase(store.clients[idx].category, name, phone);
     }
   } else {
+    // Enforce Subscription Plan Limit on Max Contacts
+    const activeSub = db.subscriptions.find((s) => s.tenantId === tenantId);
+    const activePlan = db.subscriptionPlans.find((p) => p.id === (activeSub?.planId || 'plan_pro')) || db.subscriptionPlans[0];
+    const currentTenantContactsCount = db.clients.filter((c) => c.tenantId === tenantId).length;
+
+    if (currentTenantContactsCount >= activePlan.maxContacts && req.user?.role !== 'SUPER_ADMIN') {
+      return res.status(403).json({
+        error: `Subscription Limit Reached: Plan '${activePlan.name}' allows up to ${activePlan.maxContacts} contacts. Please upgrade your subscription plan.`,
+      });
+    }
+
     const newClient = {
       id: `cnt_${Date.now()}`,
+      tenantId,
       name,
       phone,
-      category: category || store.categories[0]?.id || 'restaurants',
+      category: category || db.categories.find((cat) => cat.tenantId === tenantId)?.id || 'restaurants',
       notes: notes || '',
       status: (status as any) || 'new',
       messagesSentToday: 0,
       createdAt: new Date().toISOString(),
     };
-    store.clients.push(newClient);
-    saveContactToSupabase(newClient.category, name, phone);
+    db.clients.push(newClient);
   }
 
-  saveContactsJson();
-  res.json({ success: true, clients: store.clients });
+  saveDb();
+  const tenantClients = db.clients.filter((c) => c.tenantId === tenantId);
+  res.json({ success: true, clients: tenantClients });
 });
 
-app.delete('/api/contacts/:id', (req, res) => {
+app.delete('/api/contacts/:id', requirePermission('manage_contacts'), (req, res) => {
+  const tenantId = getTenantId(req);
   const { id } = req.params;
-  store.clients = store.clients.filter((c) => c.id !== id);
-  saveContactsJson();
-  res.json({ success: true, clients: store.clients });
+  const existingClient = db.clients.find((c) => c.id === id && c.tenantId === tenantId);
+
+  if (!existingClient) {
+    return res.status(404).json({ success: false, error: 'Client record not found' });
+  }
+
+  db.clients = db.clients.filter((c) => !(c.id === id && c.tenantId === tenantId));
+  db.aiQueue = db.aiQueue.filter((q) => q.contactId !== id);
+  db.messages = db.messages.filter((m) => m.contactId !== id);
+
+  logAudit(tenantId, req.user!.id, req.user!.email, 'DELETE_CLIENT', `Deleted client ${existingClient.name} (${existingClient.phone})`);
+  saveDb();
+
+  const tenantClients = db.clients.filter((c) => c.tenantId === tenantId);
+  res.json({
+    success: true,
+    message: `Client '${existingClient.name}' deleted successfully!`,
+    clients: tenantClients,
+  });
 });
 
-app.post('/api/messages/send', (req, res) => {
+app.post('/api/messages/send', requirePermission('send_messages'), (req, res) => {
+  const tenantId = getTenantId(req);
+  const activeTenant = db.tenants.find((t) => t.id === tenantId) || db.tenants[0];
   const { contactId, categoryId } = req.body;
 
-  const client = store.clients.find((c) => c.id === contactId);
-  const category = store.categories.find((cat) => cat.id === categoryId);
+  const client = db.clients.find((c) => c.id === contactId && c.tenantId === tenantId);
+  const category = db.categories.find((cat) => cat.id === categoryId && cat.tenantId === tenantId);
 
   if (!client || !category) {
     return res.status(404).json({ error: 'Client or Category not found' });
+  }
+
+  // Consent & Opt-Out Enforcement
+  if ((client.status as string) === 'unsubscribed') {
+    return res.status(403).json({
+      error: `Blocked by Consent Control: Client '${client.name}' (${client.phone}) has opted out/unsubscribed from broadcasts.`,
+    });
   }
 
   if (category.sentToday >= category.dailyLimit) {
@@ -494,10 +1007,16 @@ app.post('/api/messages/send', (req, res) => {
     });
   }
 
-  const messageContent = buildPersonalizedMessage(client.name, category);
+  const greeting = `السلام علیکم ${client.name},\n\n`;
+  const caption = category.captionTemplate.replace('{name}', client.name).replace('{phone}', activeTenant.senderNumber);
+  let messageContent = greeting + caption;
+  if (activeTenant.enableUrduFooter) {
+    messageContent += `\n\n${activeTenant.urduFooter} (${activeTenant.senderNumber})`;
+  }
 
   const newMessage = {
     id: `msg_${Date.now()}`,
+    tenantId,
     contactId: client.id,
     contactName: client.name,
     contactPhone: client.phone,
@@ -505,55 +1024,52 @@ app.post('/api/messages/send', (req, res) => {
     direction: 'outgoing' as const,
     content: messageContent,
     videoUrl: category.videoUrl,
-    footerText: store.settings.enableUrduFooter ? store.settings.urduFooter : '',
+    footerText: activeTenant.enableUrduFooter ? activeTenant.urduFooter : '',
     status: 'delivered' as const,
     timestamp: new Date().toISOString(),
     isAiGenerated: false,
   };
 
-  store.messages.unshift(newMessage);
-
+  db.messages.unshift(newMessage);
   category.sentToday += 1;
   client.messagesSentToday += 1;
   client.lastSentAt = newMessage.timestamp;
-  if (client.status === 'new') client.status = 'contacted';
+  if ((client.status as string) === 'new') client.status = 'contacted' as any;
 
-  saveContactsJson();
-  logActivityToSupabase('message_sent', `Sent message to ${client.name} (${category.name})`, client.phone);
-
+  saveDb();
   res.json({
     success: true,
     message: newMessage,
-    categoryStats: {
-      id: category.id,
-      sentToday: category.sentToday,
-      dailyLimit: category.dailyLimit,
-    },
+    categoryStats: { id: category.id, sentToday: category.sentToday, dailyLimit: category.dailyLimit },
   });
 });
 
-app.post('/api/messages/reset-daily-limits', (req, res) => {
-  store.categories.forEach((c) => (c.sentToday = 0));
-  store.clients.forEach((c) => (c.messagesSentToday = 0));
-  saveContactsJson();
+app.post('/api/messages/reset-daily-limits', requireRole('SUPER_ADMIN', 'BUSINESS_ADMIN'), (req, res) => {
+  const tenantId = getTenantId(req);
+  db.categories.filter((c) => c.tenantId === tenantId).forEach((c) => (c.sentToday = 0));
+  db.clients.filter((c) => c.tenantId === tenantId).forEach((c) => (c.messagesSentToday = 0));
+  saveDb();
   res.json({ success: true, message: 'Daily limit counters reset successfully' });
 });
 
-// BILINGUAL AI AUTO-ANSWER GENERATION
+// BILINGUAL AI AUTO-ANSWER GENERATION (Scoped per tenant)
 app.post('/api/messages/simulate-incoming', async (req, res) => {
+  const tenantId = getTenantId(req);
+  const activeTenant = db.tenants.find((t) => t.id === tenantId) || db.tenants[0];
   const { contactId, text, customDelaySec } = req.body;
 
-  const client = store.clients.find((c) => c.id === contactId) || store.clients[0];
-  const category = store.categories.find((cat) => cat.id === client.category) || store.categories[0];
+  const client = db.clients.find((c) => c.id === contactId && c.tenantId === tenantId) || db.clients[0];
+  const category = db.categories.find((cat) => cat.id === client.category && cat.tenantId === tenantId) || db.categories[0];
 
   const incomingText = text || 'السلام علیکم! مجھے اس آفر کی مزید تفصیلات چاہیے۔';
 
   const incomingMsg = {
     id: `msg_inc_${Date.now()}`,
+    tenantId,
     contactId: client.id,
     contactName: client.name,
     contactPhone: client.phone,
-    category: category.id,
+    category: category ? category.id : 'general',
     direction: 'incoming' as const,
     content: incomingText,
     videoUrl: '',
@@ -563,60 +1079,53 @@ app.post('/api/messages/simulate-incoming', async (req, res) => {
     isAiGenerated: false,
   };
 
-  store.messages.unshift(incomingMsg);
+  db.messages.unshift(incomingMsg);
+  if (client && (client.status as string) !== 'converted') client.status = 'interested' as any;
 
-  if (client.status !== 'converted') {
-    client.status = 'interested';
-  }
+  let generatedAnswer = `وعلیکم السلام ${client ? client.name : ''}! ہم سے رابطہ کرنے کا شکریہ۔ مزید معلومات کے لیے اس نمبر (${activeTenant.senderNumber}) پر رابطہ کر سکتے ہیں۔`;
 
-  let generatedAnswer = `وعلیکم السلام ${client.name}! ہم سے رابطہ کرنے کا شکریہ۔ ہمارے ${category.name} کی آفر کی معلومات کے لیے آپ اس نمبر (${store.settings.senderNumber}) پر رابطہ کر سکتے ہیں۔`;
-
-  if (aiClient && store.settings.enableAiAutoAnswer) {
+  if (aiClient) {
     try {
       const response = await aiClient.models.generateContent({
-        model: 'gemini-2.5-flash',
+        model: 'gemini-3.8-flash',
         contents: `CLIENT MESSAGE: "${incomingText}"
-CLIENT NAME: "${client.name}"
-CATEGORY CONTEXT: "${category.name} - ${category.captionTemplate}"
+CLIENT NAME: "${client ? client.name : 'Client'}"
+BUSINESS: "${activeTenant.name}"
 
 BILINGUAL RULE:
 1. Detect if the CLIENT MESSAGE is in Urdu / Roman Urdu or English.
-2. If the client messaged in Urdu or Roman Urdu (e.g. "Salam", "Price kya hai", "Detail batayein"), reply in polite, natural Roman Urdu or Urdu text.
-3. If the client messaged in English (e.g. "Hello, please provide rates and availability"), reply in concise, professional English.
-4. Keep answer under 2-3 short sentences. Include sender phone ${store.settings.senderNumber}.`,
-        config: {
-          systemInstruction: store.settings.aiSystemInstruction,
-        },
+2. If Urdu/Roman Urdu -> reply in polite Roman Urdu or Urdu text.
+3. If English -> reply in professional English.
+4. Keep answer under 2-3 short sentences. Mention contact number ${activeTenant.senderNumber}.`,
+        config: { systemInstruction: activeTenant.aiSystemInstruction },
       });
 
-      if (response.text) {
-        generatedAnswer = response.text.trim();
-      }
+      if (response.text) generatedAnswer = response.text.trim();
     } catch (aiErr) {
-      console.error('Gemini API Bilingual Auto-Answer error:', aiErr);
+      console.error('Gemini API Auto-Answer error:', aiErr);
     }
   }
 
-  const delaySec = customDelaySec !== undefined ? Number(customDelaySec) : store.settings.aiDelayMinutes * 60;
+  const delaySec = customDelaySec !== undefined ? Number(customDelaySec) : activeTenant.aiDelayMinutes * 60;
   const scheduledTime = Date.now() + delaySec * 1000;
 
   const pendingAiItem = {
     id: `ai_queue_${Date.now()}`,
-    contactId: client.id,
-    contactName: client.name,
-    contactPhone: client.phone,
+    tenantId,
+    contactId: client ? client.id : 'cnt_1',
+    contactName: client ? client.name : 'Client',
+    contactPhone: client ? client.phone : activeTenant.senderNumber,
     incomingMessage: incomingMsg.content,
-    category: category.id,
-    generatedAnswer: generatedAnswer,
-    scheduledTime: scheduledTime,
+    category: category ? category.id : 'general',
+    generatedAnswer,
+    scheduledTime,
     delaySecondsLeft: delaySec,
     status: delaySec <= 0 ? 'ready' : 'waiting',
     createdAt: new Date().toISOString(),
   };
 
-  store.aiQueue.unshift(pendingAiItem);
-  saveContactsJson();
-  logActivityToSupabase('incoming_message', `Received from ${client.name}: ${incomingText}`, client.phone);
+  db.aiQueue.unshift(pendingAiItem);
+  saveDb();
 
   res.json({
     success: true,
@@ -625,17 +1134,18 @@ BILINGUAL RULE:
   });
 });
 
-app.post('/api/ai-queue/send-now', (req, res) => {
+app.post('/api/ai-queue/send-now', requirePermission('send_messages'), (req, res) => {
+  const tenantId = getTenantId(req);
+  const activeTenant = db.tenants.find((t) => t.id === tenantId) || db.tenants[0];
   const { queueId } = req.body;
-  const itemIdx = store.aiQueue.findIndex((q) => q.id === queueId);
-  if (itemIdx === -1) {
-    return res.status(404).json({ error: 'Queue item not found' });
-  }
+  const itemIdx = db.aiQueue.findIndex((q) => q.id === queueId && q.tenantId === tenantId);
+  if (itemIdx === -1) return res.status(404).json({ error: 'Queue item not found' });
 
-  const item = store.aiQueue[itemIdx];
+  const item = db.aiQueue[itemIdx];
 
   const aiMessage = {
     id: `msg_ai_${Date.now()}`,
+    tenantId,
     contactId: item.contactId,
     contactName: item.contactName,
     contactPhone: item.contactPhone,
@@ -643,45 +1153,53 @@ app.post('/api/ai-queue/send-now', (req, res) => {
     direction: 'outgoing' as const,
     content: `🤖 [Bilingual Gemini AI Auto-Reply]:\n${item.generatedAnswer}`,
     videoUrl: '',
-    footerText: store.settings.enableUrduFooter ? store.settings.urduFooter : '',
+    footerText: activeTenant.enableUrduFooter ? activeTenant.urduFooter : '',
     status: 'delivered' as const,
     timestamp: new Date().toISOString(),
     isAiGenerated: true,
   };
 
-  store.messages.unshift(aiMessage);
-  store.aiQueue[itemIdx].status = 'sent';
-  store.aiQueue[itemIdx].delaySecondsLeft = 0;
+  db.messages.unshift(aiMessage);
+  db.aiQueue[itemIdx].status = 'sent';
+  db.aiQueue[itemIdx].delaySecondsLeft = 0;
 
-  saveContactsJson();
-  res.json({ success: true, message: aiMessage, queueItem: store.aiQueue[itemIdx] });
+  saveDb();
+  res.json({ success: true, message: aiMessage, queueItem: db.aiQueue[itemIdx] });
 });
 
-app.post('/api/ai-queue/cancel', (req, res) => {
+app.post('/api/ai-queue/cancel', requirePermission('send_messages'), (req, res) => {
+  const tenantId = getTenantId(req);
   const { queueId } = req.body;
-  store.aiQueue = store.aiQueue.filter((q) => q.id !== queueId);
-  saveContactsJson();
-  res.json({ success: true, aiQueue: store.aiQueue });
+  db.aiQueue = db.aiQueue.filter((q) => !(q.id === queueId && q.tenantId === tenantId));
+  saveDb();
+  res.json({ success: true });
 });
 
-app.post('/api/settings', (req, res) => {
-  store.settings = { ...store.settings, ...req.body };
-  saveContactsJson();
-  res.json({ success: true, settings: store.settings });
+app.post('/api/settings', requireRole('SUPER_ADMIN', 'BUSINESS_ADMIN'), (req, res) => {
+  const tenantId = getTenantId(req);
+  const tenantIdx = db.tenants.findIndex((t) => t.id === tenantId);
+  if (tenantIdx !== -1) {
+    db.tenants[tenantIdx] = { ...db.tenants[tenantIdx], ...req.body };
+  }
+  logAudit(tenantId, req.user!.id, req.user!.email, 'UPDATE_SETTINGS', `Updated business & AI settings for tenant ${tenantId}`);
+  saveDb();
+  res.json({ success: true, tenant: db.tenants[tenantIdx] });
 });
 
-// Background Timer Worker
+// Background Timer Worker for delayed AI answers
 setInterval(() => {
   const now = Date.now();
   let changed = false;
 
-  store.aiQueue.forEach((item) => {
+  db.aiQueue.forEach((item) => {
     if (item.status === 'waiting' && now >= item.scheduledTime) {
+      const activeTenant = db.tenants.find((t) => t.id === item.tenantId) || db.tenants[0];
       item.status = 'sent';
       item.delaySecondsLeft = 0;
 
-      store.messages.unshift({
+      db.messages.unshift({
         id: `msg_ai_auto_${Date.now()}`,
+        tenantId: item.tenantId,
         contactId: item.contactId,
         contactName: item.contactName,
         contactPhone: item.contactPhone,
@@ -689,7 +1207,7 @@ setInterval(() => {
         direction: 'outgoing' as const,
         content: `🤖 [Bilingual Gemini AI Reply - 5 Min Delayed]:\n${item.generatedAnswer}`,
         videoUrl: '',
-        footerText: store.settings.enableUrduFooter ? store.settings.urduFooter : '',
+        footerText: activeTenant.enableUrduFooter ? activeTenant.urduFooter : '',
         status: 'delivered' as const,
         timestamp: new Date().toISOString(),
         isAiGenerated: true,
@@ -699,13 +1217,19 @@ setInterval(() => {
     }
   });
 
-  if (changed) {
-    saveContactsJson();
-  }
+  if (changed) saveDb();
 }, 3000);
 
 // Start Server with Vite Middleware
 async function start() {
+  app.use('/api/*', (req, res, next) => {
+    if (!res.headersSent) {
+      res.status(404).json({ error: `API endpoint ${req.originalUrl} not found` });
+    } else {
+      next();
+    }
+  });
+
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
       server: { middlewareMode: true },
@@ -733,10 +1257,9 @@ async function start() {
   const portNum = typeof PORT === 'string' ? parseInt(PORT, 10) : PORT;
   app.listen(portNum, '0.0.0.0', () => {
     console.log(`=======================================================`);
-    console.log(`🚀 WhatsApp Dynamic System Running at http://localhost:${portNum}`);
-    console.log(`🌍 Bilingual Gemini AI Auto-Answer Enabled (Urdu/English)`);
-    console.log(`⏱️ 5-Minute Delayed Queue Active`);
-    console.log(`🗄️ Supabase Cloud Database Connected`);
+    console.log(`🚀 Multi-Tenant Commercial SaaS Server at http://localhost:${portNum}`);
+    console.log(`🏢 Active Tenants: ${db.tenants.length} Organizations`);
+    console.log(`👥 Registered Users: ${db.users.length}`);
     console.log(`=======================================================`);
   });
 }

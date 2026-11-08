@@ -164,12 +164,12 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
                 <span className="font-mono font-semibold text-white">{settings.senderNumber}</span>
               </div>
               <div className="flex justify-between items-center text-xs p-3 rounded-xl bg-slate-950/70 border border-slate-800">
-                <span className="text-slate-400">Engine Type:</span>
-                <span className="text-emerald-400 font-medium">@whiskeysockets/baileys (v6.6.0)</span>
+                <span className="text-slate-400">Connection Engine:</span>
+                <span className="text-emerald-400 font-medium">WhatsApp Web QR Linked</span>
               </div>
               <div className="flex justify-between items-center text-xs p-3 rounded-xl bg-slate-950/70 border border-slate-800">
-                <span className="text-slate-400">Auth State:</span>
-                <span className="text-slate-200">Multi-File Auth (multi_file_baileys_auth)</span>
+                <span className="text-slate-400">AI Auto-Reply:</span>
+                <span className="text-slate-200">Bilingual Active (Urdu / English)</span>
               </div>
             </div>
 
