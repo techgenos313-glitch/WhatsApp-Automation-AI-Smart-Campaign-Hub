@@ -1,0 +1,8 @@
+{
+  "name": "WhatsApp Automation & AI Smart Campaign Hub",
+  "description": "Enterprise-grade WhatsApp automation system featuring Baileys QR code pairing, category-based video campaigns with personalized Urdu/English footers, smart daily rate limits, Gemini AI auto-reply with 5-minute delayed response queue, live inbox simulator, and Supabase integration.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
