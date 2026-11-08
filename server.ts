@@ -3,6 +3,7 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import path from 'path';
 import fs from 'fs';
+import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import { createServer as createViteServer } from 'vite';
 import QRCode from 'qrcode';
@@ -39,6 +40,101 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
+// ===== SITE PASSWORD GATE =====
+const APP_PASSWORD = process.env.APP_PASSWORD || '';
+const GATE_SECRET =
+  process.env.SESSION_SECRET ||
+  (APP_PASSWORD ? crypto.createHash('sha256').update('gate:' + APP_PASSWORD).digest('hex') : '');
+const GATE_COOKIE = 'wa_gate';
+const GATE_DAYS = 30;
+
+app.set('trust proxy', 1);
+app.use(express.urlencoded({ extended: false }));
+
+function gateSign(value: string) {
+  return crypto.createHmac('sha256', GATE_SECRET).update(value).digest('hex');
+}
+
+function gateMakeToken() {
+  const exp = String(Date.now() + GATE_DAYS * 86400000);
+  return `${exp}.${gateSign(exp)}`;
+}
+
+function gateIsValid(token: string | undefined) {
+  if (!token) return false;
+  const [exp, sig] = token.split('.');
+  if (!exp || !sig) return false;
+  if (Number(exp) < Date.now()) return false;
+  const a = Buffer.from(sig);
+  const b = Buffer.from(gateSign(exp));
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+function gateGetCookie(req: express.Request) {
+  const raw = req.headers.cookie || '';
+  const found = raw.split(';').map((s) => s.trim()).find((s) => s.startsWith(GATE_COOKIE + '='));
+  return found ? decodeURIComponent(found.slice(GATE_COOKIE.length + 1)) : undefined;
+}
+
+function gatePasswordOk(input: string) {
+  const a = crypto.createHash('sha256').update(input).digest();
+  const b = crypto.createHash('sha256').update(APP_PASSWORD).digest();
+  return crypto.timingSafeEqual(a, b);
+}
+
+const gateFails = new Map<string, { count: number; until: number }>();
+
+function gatePage(msg = '') {
+  return `<!doctype html><html lang="ur"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Login</title>
+<style>body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#0b0f0e;color:#e5e7eb;font-family:system-ui,sans-serif}
+form{width:90%;max-width:340px;background:#111816;border:1px solid #1f2d29;border-radius:16px;padding:24px}
+h1{font-size:20px;margin:0 0 16px;color:#10b981}
+input{width:100%;box-sizing:border-box;padding:12px;border-radius:10px;border:1px solid #2a3b36;background:#0b0f0e;color:#fff;font-size:16px}
+button{width:100%;margin-top:12px;padding:12px;border:0;border-radius:10px;background:#10b981;color:#04130e;font-size:16px;font-weight:700}
+p{color:#f87171;font-size:14px;margin:10px 0 0}</style></head><body>
+<form method="POST" action="/gate-login"><h1>WhatsApp Hub</h1>
+<input type="password" name="password" placeholder="Password" autofocus required>
+<button type="submit">Login</button>${msg ? `<p>${msg}</p>` : ''}</form></body></html>`;
+}
+
+if (APP_PASSWORD) {
+  app.post('/gate-login', (req, res) => {
+    const ip = req.ip || 'unknown';
+    let rec = gateFails.get(ip);
+    if (rec && rec.until && rec.until <= Date.now()) {
+      gateFails.delete(ip);
+      rec = undefined;
+    }
+    if (rec && rec.until > Date.now()) {
+      return res.status(429).send(gatePage('Bohat zyada koshishen. 15 minute baad dobara try karein.'));
+    }
+
+    const pw = String(req.body?.password || '');
+    if (gatePasswordOk(pw)) {
+      gateFails.delete(ip);
+      res.setHeader(
+        'Set-Cookie',
+        `${GATE_COOKIE}=${encodeURIComponent(gateMakeToken())}; Path=/; Max-Age=${GATE_DAYS * 86400}; HttpOnly; SameSite=Lax${req.secure ? '; Secure' : ''}`
+      );
+      return res.redirect('/');
+    }
+
+    const count = (rec?.count || 0) + 1;
+    gateFails.set(ip, { count, until: count >= 5 ? Date.now() + 15 * 60 * 1000 : 0 });
+    return res.status(401).send(gatePage('Password ghalat hai.'));
+  });
+
+  app.use((req, res, next) => {
+    const open = ['/manifest.webmanifest', '/icon.svg', '/sw.js'];
+    if (open.includes(req.path)) return next();
+    if (gateIsValid(gateGetCookie(req))) return next();
+    if (req.path.startsWith('/api/')) return res.status(401).json({ error: 'Login required' });
+    return res.status(401).send(gatePage());
+  });
+} else {
+  console.warn('⚠️ APP_PASSWORD set nahi hai: site par password protection band hai.');
+}
+// ===== END PASSWORD GATE =====
 // Directories setup
 const DATA_DIR = path.join(__dirname, 'data');
 const MEDIA_DIR = path.join(__dirname, 'media');
