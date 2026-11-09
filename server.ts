@@ -9,6 +9,8 @@ import { createServer as createViteServer } from 'vite';
 import QRCode from 'qrcode';
 import { GoogleGenAI } from '@google/genai';
 import { createClient } from '@supabase/supabase-js';
+import * as Baileys from '@whiskeysockets/baileys';
+import pino from 'pino';
 import type { AppUser, UserRole, StaffPermission } from './src/types';
 dotenv.config();
 
@@ -135,6 +137,7 @@ if (APP_PASSWORD) {
   console.warn('⚠️ APP_PASSWORD set nahi hai: site par password protection band hai.');
 }
 // ===== END PASSWORD GATE =====
+
 // Directories setup
 const DATA_DIR = path.join(__dirname, 'data');
 const MEDIA_DIR = path.join(__dirname, 'media');
@@ -421,20 +424,18 @@ Always keep answers under 2-3 short sentences. Mention sender WhatsApp number +9
   aiQueue: [] as Array<any>,
   connections: {
     tenant_default: {
-      status: 'connected',
-      phoneNumber: '+92 300 1234567',
-      deviceInfo: 'Baileys Multi-Tenant Socket (Gourmet)',
+      status: 'disconnected',
+      phoneNumber: '',
+      deviceInfo: 'WhatsApp (Baileys)',
       qrCodeDataUrl: '',
       qrCodeRaw: '',
-      connectedAt: new Date(Date.now() - 86400000).toISOString(),
     },
     tenant_realestate: {
-      status: 'connected',
-      phoneNumber: '+92 321 9876543',
-      deviceInfo: 'Baileys Multi-Tenant Socket (Royal)',
+      status: 'disconnected',
+      phoneNumber: '',
+      deviceInfo: 'WhatsApp (Baileys)',
       qrCodeDataUrl: '',
       qrCodeRaw: '',
-      connectedAt: new Date(Date.now() - 86400000).toISOString(),
     },
   } as Record<string, any>,
   settings: {
@@ -538,30 +539,240 @@ function logAudit(tenantId: string | undefined, userId: string, userEmail: strin
   saveDb();
 }
 
-// Generate Tenant-Specific QR Code
-async function refreshTenantQrCode(tenantId: string) {
-  const qrString = `2@WA_BAILEYS_AUTH:${tenantId}:${Math.random().toString(36).substring(2, 15)}:${Date.now()}`;
+// ===== ASLI WHATSAPP (BAILEYS) =====
+const BaileysLib: any = Baileys;
+const makeWASocket: any =
+  typeof BaileysLib.default === 'function'
+    ? BaileysLib.default
+    : (BaileysLib.default?.default ?? BaileysLib.makeWASocket);
+const pickB = (k: string) => BaileysLib[k] ?? BaileysLib.default?.[k];
+const DisconnectReason = pickB('DisconnectReason');
+const initAuthCreds = pickB('initAuthCreds');
+const BufferJSON = pickB('BufferJSON');
+const proto = pickB('proto');
+const makeCacheableSignalKeyStore = pickB('makeCacheableSignalKeyStore');
+const fetchLatestBaileysVersion = pickB('fetchLatestBaileysVersion');
+const useMultiFileAuthState = pickB('useMultiFileAuthState');
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const waSockets: Record<string, any> = {};
+const waStarting: Record<string, boolean> = {};
+const waRetries: Record<string, number> = {};
+
+function ensureConn(tenantId: string) {
+  if (!db.connections[tenantId]) {
+    db.connections[tenantId] = {
+      status: 'disconnected',
+      phoneNumber: '',
+      deviceInfo: 'WhatsApp (Baileys)',
+      qrCodeDataUrl: '',
+      qrCodeRaw: '',
+    };
+  }
+  return db.connections[tenantId];
+}
+
+async function clearWaAuth(tenantId: string) {
+  if (!supabase) return;
+  const { error } = await supabase.from('wa_auth').delete().like('id', `${tenantId}:%`);
+  if (error) console.error('wa_auth clear error:', error.message);
+}
+
+// WhatsApp ka login (session) Supabase mein save hota hai
+async function useSupabaseAuthState(tenantId: string) {
+  const prefix = `${tenantId}:`;
+
+  const readData = async (key: string) => {
+    const { data, error } = await supabase!
+      .from('wa_auth')
+      .select('data')
+      .eq('id', prefix + key)
+      .maybeSingle();
+    if (error || !data) return null;
+    return JSON.parse(data.data, BufferJSON.reviver);
+  };
+
+  const creds: any = (await readData('creds')) || initAuthCreds();
+
+  return {
+    state: {
+      creds,
+      keys: {
+        get: async (type: string, ids: string[]) => {
+          const result: Record<string, any> = {};
+          if (!ids.length) return result;
+          const { data } = await supabase!
+            .from('wa_auth')
+            .select('id,data')
+            .in('id', ids.map((id) => `${prefix}${type}-${id}`));
+          const map = new Map<string, string>((data || []).map((r: any) => [r.id, r.data] as [string, string]));
+          for (const id of ids) {
+            const raw = map.get(`${prefix}${type}-${id}`);
+            let value = raw ? JSON.parse(raw, BufferJSON.reviver) : null;
+            if (type === 'app-state-sync-key' && value) {
+              value = proto.Message.AppStateSyncKeyData.fromObject(value);
+            }
+            result[id] = value;
+          }
+          return result;
+        },
+        set: async (data: any) => {
+          const upserts: any[] = [];
+          const deletes: string[] = [];
+          const now = new Date().toISOString();
+          for (const category of Object.keys(data)) {
+            for (const id of Object.keys(data[category])) {
+              const value = data[category][id];
+              const key = `${prefix}${category}-${id}`;
+              if (value) {
+                upserts.push({ id: key, data: JSON.stringify(value, BufferJSON.replacer), updated_at: now });
+              } else {
+                deletes.push(key);
+              }
+            }
+          }
+          if (upserts.length) {
+            const { error } = await supabase!.from('wa_auth').upsert(upserts);
+            if (error) console.error('wa_auth keys save error:', error.message);
+          }
+          if (deletes.length) {
+            await supabase!.from('wa_auth').delete().in('id', deletes);
+          }
+        },
+      },
+    },
+    saveCreds: async () => {
+      const { error } = await supabase!
+        .from('wa_auth')
+        .upsert({ id: prefix + 'creds', data: JSON.stringify(creds, BufferJSON.replacer), updated_at: new Date().toISOString() });
+      if (error) console.error('wa_auth creds save error:', error.message);
+    },
+  };
+}
+
+async function startWhatsApp(tenantId: string) {
+  if (waStarting[tenantId]) return;
+  waStarting[tenantId] = true;
   try {
-    const dataUrl = await QRCode.toDataURL(qrString, { margin: 2, scale: 6 });
-    if (!db.connections[tenantId]) {
-      db.connections[tenantId] = {
-        status: 'qr_ready',
-        phoneNumber: '+92 300 1234567',
-        deviceInfo: `Baileys Socket (${tenantId})`,
-        qrCodeDataUrl: '',
-        qrCodeRaw: '',
-      };
-    }
-    db.connections[tenantId].qrCodeRaw = qrString;
-    db.connections[tenantId].qrCodeDataUrl = dataUrl;
-    db.connections[tenantId].status = 'qr_ready';
+    const logger = pino({ level: 'silent' });
+    const auth: any = supabase
+      ? await useSupabaseAuthState(tenantId)
+      : await useMultiFileAuthState(path.join(DATA_DIR, `wa_auth_${tenantId}`));
+    const { version } = await fetchLatestBaileysVersion();
+
+    const sock = makeWASocket({
+      version,
+      auth: {
+        creds: auth.state.creds,
+        keys: makeCacheableSignalKeyStore(auth.state.keys, logger),
+      },
+      logger,
+      browser: ['WhatsApp Hub', 'Chrome', '1.0.0'],
+      markOnlineOnConnect: false,
+      syncFullHistory: false,
+    });
+
+    waSockets[tenantId] = sock;
+    let opened = false;
+
+    sock.ev.on('creds.update', auth.saveCreds);
+
+    sock.ev.on('connection.update', async (update: any) => {
+      const { connection, lastDisconnect, qr } = update;
+      const c = ensureConn(tenantId);
+
+      if (qr) {
+        try {
+          c.qrCodeRaw = qr;
+          c.qrCodeDataUrl = await QRCode.toDataURL(qr, { margin: 2, scale: 6 });
+          c.status = 'qr_ready';
+        } catch (e) {
+          console.error('QR banane mein masla:', e);
+        }
+      }
+
+      if (connection === 'open') {
+        opened = true;
+        waRetries[tenantId] = 0;
+        const num = String(sock.user?.id || '').split(':')[0].split('@')[0];
+        c.status = 'connected';
+        c.phoneNumber = num ? '+' + num : c.phoneNumber;
+        c.deviceInfo = 'WhatsApp (Baileys)';
+        c.qrCodeDataUrl = '';
+        c.qrCodeRaw = '';
+        c.connectedAt = new Date().toISOString();
+        console.log(`✅ WhatsApp connected (${tenantId}): ${c.phoneNumber}`);
+      }
+
+      if (connection === 'close') {
+        if (waSockets[tenantId] !== sock) return;
+        delete waSockets[tenantId];
+        const code = (lastDisconnect?.error as any)?.output?.statusCode;
+        c.status = 'disconnected';
+        c.qrCodeDataUrl = '';
+        c.qrCodeRaw = '';
+        console.log(`WhatsApp band (${tenantId}), code: ${code}`);
+
+        if (code === DisconnectReason.loggedOut) {
+          await clearWaAuth(tenantId);
+          return;
+        }
+        if (code === DisconnectReason.connectionReplaced) {
+          console.log('Kisi aur jagah se isi session par login hua, dobara connect nahi kar raha.');
+          return;
+        }
+        if (!opened && code === DisconnectReason.timedOut) {
+          return; // QR scan nahi hua, user dobara "Scan QR Code" dabaye
+        }
+        waRetries[tenantId] = (waRetries[tenantId] || 0) + 1;
+        if (waRetries[tenantId] > 6) {
+          console.log('Bohat dafa connect karne ki koshish ki, ab ruk raha hoon.');
+          return;
+        }
+        setTimeout(() => startWhatsApp(tenantId), Math.min(30000, 3000 * waRetries[tenantId]));
+      }
+    });
   } catch (err) {
-    console.error('Error generating tenant QR code:', err);
+    console.error('WhatsApp start error:', err);
+  } finally {
+    waStarting[tenantId] = false;
   }
 }
 
-refreshTenantQrCode('tenant_default');
-refreshTenantQrCode('tenant_realestate');
+async function initWhatsAppSessions() {
+  // purani nakli "connected" halat saaf karo
+  for (const t of db.tenants) {
+    const c = ensureConn(t.id);
+    c.status = 'disconnected';
+    c.qrCodeDataUrl = '';
+    c.qrCodeRaw = '';
+  }
+  if (!supabase) return;
+  const { data, error } = await supabase.from('wa_auth').select('id').like('id', '%:creds');
+  if (error) {
+    console.error('WhatsApp sessions load error:', error.message);
+    return;
+  }
+  for (const row of data || []) {
+    const tenantId = String(row.id).replace(/:creds$/, '');
+    if (db.tenants.some((t) => t.id === tenantId)) {
+      console.log(`WhatsApp session mili (${tenantId}), connect kar raha hoon...`);
+      await startWhatsApp(tenantId);
+    }
+  }
+}
+
+async function resolveJid(sock: any, phone: string): Promise<string | null> {
+  let digits = String(phone).replace(/\D/g, '');
+  if (digits.startsWith('00')) digits = digits.slice(2);
+  if (digits.startsWith('920')) digits = '92' + digits.slice(3);
+  else if (digits.startsWith('0')) digits = '92' + digits.slice(1);
+  if (digits.length < 10) return null;
+  const results = await sock.onWhatsApp(digits + '@s.whatsapp.net');
+  const hit = Array.isArray(results) ? results[0] : null;
+  return hit && hit.exists ? hit.jid : null;
+}
+// ===== END ASLI WHATSAPP =====
 
 // Authentication & Tenant Resolution Middleware
 declare global {
@@ -732,14 +943,7 @@ app.post('/api/tenants', requireRole('SUPER_ADMIN', 'BUSINESS_ADMIN'), (req, res
     messagesSentThisMonth: 0,
   });
 
-  db.connections[tenantId] = {
-    status: 'connected',
-    phoneNumber: newTenant.senderNumber,
-    deviceInfo: `Baileys Socket (${newTenant.name})`,
-    qrCodeDataUrl: '',
-    qrCodeRaw: '',
-    connectedAt: new Date().toISOString(),
-  };
+  ensureConn(tenantId);
 
   logAudit(tenantId, req.user!.id, req.user!.email, 'CREATE_TENANT', `Created organization '${newTenant.name}'`);
 
@@ -924,13 +1128,7 @@ app.get('/api/state', (req, res) => {
   const tenantClients = db.clients.filter((c) => c.tenantId === tenantId || !c.tenantId);
   const tenantMessages = db.messages.filter((m) => m.tenantId === tenantId || !m.tenantId);
   const tenantAiQueue = db.aiQueue.filter((q) => q.tenantId === tenantId || !q.tenantId);
-  const tenantConn = db.connections[tenantId] || {
-    status: 'connected',
-    phoneNumber: activeTenant.senderNumber,
-    deviceInfo: 'Baileys Socket',
-    qrCodeDataUrl: '',
-    qrCodeRaw: '',
-  };
+  const tenantConn = ensureConn(tenantId);
 
   const activeSub = db.subscriptions.find((s) => s.tenantId === tenantId);
   const activePlan = db.subscriptionPlans.find((p) => p.id === (activeSub?.planId || activeTenant?.planId || 'plan_pro'));
@@ -968,36 +1166,43 @@ app.get('/api/state', (req, res) => {
   });
 });
 
-app.post('/api/connection/qr', requireRole('SUPER_ADMIN', 'BUSINESS_ADMIN'), async (req, res) => {
+// WhatsApp connection routes (asli Baileys)
+async function connectHandler(req: express.Request, res: express.Response) {
   const tenantId = getTenantId(req);
-  await refreshTenantQrCode(tenantId);
-  saveDb();
-  res.json({ success: true, connection: db.connections[tenantId] });
-});
-
-app.post('/api/connection/connect', requireRole('SUPER_ADMIN', 'BUSINESS_ADMIN'), (req, res) => {
-  const tenantId = getTenantId(req);
-  const { phoneNumber } = req.body;
-  if (!db.connections[tenantId]) {
-    db.connections[tenantId] = { status: 'connected', phoneNumber: phoneNumber || '+92 300 1234567', deviceInfo: 'Baileys Socket', qrCodeDataUrl: '', qrCodeRaw: '' };
+  const c = ensureConn(tenantId);
+  if (c.status !== 'connected') {
+    if (!waSockets[tenantId]) {
+      waRetries[tenantId] = 0;
+      startWhatsApp(tenantId);
+    }
+    for (let i = 0; i < 16 && !c.qrCodeDataUrl && c.status !== 'connected'; i++) {
+      await sleep(500);
+    }
   }
-  db.connections[tenantId].status = 'connected';
-  if (phoneNumber) db.connections[tenantId].phoneNumber = phoneNumber;
-  db.connections[tenantId].connectedAt = new Date().toISOString();
+  res.json({ success: true, connection: c });
+}
 
-  logAudit(tenantId, req.user!.id, req.user!.email, 'WHATSAPP_CONNECT', `Connected Baileys WhatsApp socket for tenant ${tenantId}`);
-  saveDb();
-  res.json({ success: true, connection: db.connections[tenantId] });
-});
+app.post('/api/connection/qr', requireRole('SUPER_ADMIN', 'BUSINESS_ADMIN'), connectHandler);
+app.post('/api/connection/connect', requireRole('SUPER_ADMIN', 'BUSINESS_ADMIN'), connectHandler);
 
-app.post('/api/connection/disconnect', requireRole('SUPER_ADMIN', 'BUSINESS_ADMIN'), (req, res) => {
+app.post('/api/connection/disconnect', requireRole('SUPER_ADMIN', 'BUSINESS_ADMIN'), async (req, res) => {
   const tenantId = getTenantId(req);
-  if (db.connections[tenantId]) {
-    db.connections[tenantId].status = 'disconnected';
+  const sock = waSockets[tenantId];
+  waRetries[tenantId] = 99;
+  delete waSockets[tenantId];
+  try {
+    if (sock) await sock.logout();
+  } catch (e) {
+    console.error('Logout error:', e);
   }
+  await clearWaAuth(tenantId);
+  const c = ensureConn(tenantId);
+  c.status = 'disconnected';
+  c.qrCodeDataUrl = '';
+  c.qrCodeRaw = '';
   logAudit(tenantId, req.user!.id, req.user!.email, 'WHATSAPP_DISCONNECT', `Disconnected WhatsApp session for tenant ${tenantId}`);
   saveDb();
-  res.json({ success: true, connection: db.connections[tenantId] });
+  res.json({ success: true, connection: c });
 });
 
 app.post('/api/categories', requirePermission('manage_categories'), (req, res) => {
@@ -1122,7 +1327,7 @@ app.delete('/api/contacts/:id', requirePermission('manage_contacts'), (req, res)
   });
 });
 
-app.post('/api/messages/send', requirePermission('send_messages'), (req, res) => {
+app.post('/api/messages/send', requirePermission('send_messages'), async (req, res) => {
   const tenantId = getTenantId(req);
   const activeTenant = db.tenants.find((t) => t.id === tenantId) || db.tenants[0];
   const { contactId, categoryId } = req.body;
@@ -1149,11 +1354,32 @@ app.post('/api/messages/send', requirePermission('send_messages'), (req, res) =>
     });
   }
 
+  const sock = waSockets[tenantId];
+  if (!sock || ensureConn(tenantId).status !== 'connected') {
+    return res.status(409).json({
+      error: 'WhatsApp connected nahi hai. Pehle "Scan QR Code" se apna number jorein.',
+    });
+  }
+
   const greeting = `السلام علیکم ${client.name},\n\n`;
   const caption = category.captionTemplate.replace('{name}', client.name).replace('{phone}', activeTenant.senderNumber);
   let messageContent = greeting + caption;
   if (activeTenant.enableUrduFooter) {
     messageContent += `\n\n${activeTenant.urduFooter} (${activeTenant.senderNumber})`;
+  }
+
+  try {
+    const jid = await resolveJid(sock, client.phone);
+    if (!jid) {
+      return res.status(400).json({ error: `Number ${client.phone} WhatsApp par nahi mila ya format ghalat hai.` });
+    }
+    await sock.sendPresenceUpdate('composing', jid);
+    await sleep(2000 + Math.random() * 3000);
+    await sock.sendMessage(jid, { text: messageContent });
+    await sock.sendPresenceUpdate('paused', jid);
+  } catch (err: any) {
+    console.error('WhatsApp send error:', err?.message || err);
+    return res.status(502).json({ error: 'Message bhejne mein masla aaya: ' + (err?.message || 'unknown') });
   }
 
   const newMessage = {
@@ -1364,7 +1590,9 @@ setInterval(() => {
 
 // Start Server with Vite Middleware
 async function start() {
-    await loadDbFromSupabase();
+  await loadDbFromSupabase();
+  await initWhatsAppSessions();
+
   app.use('/api/*', (req, res, next) => {
     if (!res.headersSent) {
       res.status(404).json({ error: `API endpoint ${req.originalUrl} not found` });
