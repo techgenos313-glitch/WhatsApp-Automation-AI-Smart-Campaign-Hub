@@ -567,6 +567,7 @@ function ensureConn(tenantId: string) {
       deviceInfo: 'WhatsApp (Baileys)',
       qrCodeDataUrl: '',
       qrCodeRaw: '',
+      pairingCode: '',
     };
   }
   return db.connections[tenantId];
@@ -650,7 +651,7 @@ async function useSupabaseAuthState(tenantId: string) {
   };
 }
 
-async function startWhatsApp(tenantId: string) {
+async function startWhatsApp(tenantId: string, pairingPhone?: string) {
   if (waStarting[tenantId]) return;
   waStarting[tenantId] = true;
   try {
@@ -674,6 +675,21 @@ async function startWhatsApp(tenantId: string) {
 
     waSockets[tenantId] = sock;
     let opened = false;
+
+    // Phone number se link karne ka code (QR ke bajaye)
+    if (pairingPhone && !auth.state.creds.registered) {
+      setTimeout(async () => {
+        try {
+          const code = await sock.requestPairingCode(pairingPhone);
+          const cc = ensureConn(tenantId);
+          cc.pairingCode = code;
+          cc.status = 'qr_ready';
+          console.log(`🔑 Pairing code ban gaya (${tenantId})`);
+        } catch (e: any) {
+          console.error('Pairing code error:', e?.message || e);
+        }
+      }, 3000);
+    }
 
     sock.ev.on('creds.update', auth.saveCreds);
 
@@ -700,6 +716,7 @@ async function startWhatsApp(tenantId: string) {
         c.deviceInfo = 'WhatsApp (Baileys)';
         c.qrCodeDataUrl = '';
         c.qrCodeRaw = '';
+        c.pairingCode = '';
         c.connectedAt = new Date().toISOString();
         console.log(`✅ WhatsApp connected (${tenantId}): ${c.phoneNumber}`);
       }
@@ -711,6 +728,7 @@ async function startWhatsApp(tenantId: string) {
         c.status = 'disconnected';
         c.qrCodeDataUrl = '';
         c.qrCodeRaw = '';
+        c.pairingCode = '';
         console.log(`WhatsApp band (${tenantId}), code: ${code}`);
 
         if (code === DisconnectReason.loggedOut) {
@@ -762,11 +780,16 @@ async function initWhatsAppSessions() {
   }
 }
 
-async function resolveJid(sock: any, phone: string): Promise<string | null> {
+function normalizeDigits(phone: string): string {
   let digits = String(phone).replace(/\D/g, '');
   if (digits.startsWith('00')) digits = digits.slice(2);
   if (digits.startsWith('920')) digits = '92' + digits.slice(3);
   else if (digits.startsWith('0')) digits = '92' + digits.slice(1);
+  return digits;
+}
+
+async function resolveJid(sock: any, phone: string): Promise<string | null> {
+  const digits = normalizeDigits(phone);
   if (digits.length < 10) return null;
   const results = await sock.onWhatsApp(digits + '@s.whatsapp.net');
   const hit = Array.isArray(results) ? results[0] : null;
@@ -1200,9 +1223,101 @@ app.post('/api/connection/disconnect', requireRole('SUPER_ADMIN', 'BUSINESS_ADMI
   c.status = 'disconnected';
   c.qrCodeDataUrl = '';
   c.qrCodeRaw = '';
+  c.pairingCode = '';
   logAudit(tenantId, req.user!.id, req.user!.email, 'WHATSAPP_DISCONNECT', `Disconnected WhatsApp session for tenant ${tenantId}`);
   saveDb();
   res.json({ success: true, connection: c });
+});
+
+// Phone number se WhatsApp link (pairing code)
+app.post('/api/connection/pair', requireRole('SUPER_ADMIN', 'BUSINESS_ADMIN'), async (req, res) => {
+  const tenantId = getTenantId(req);
+  const c = ensureConn(tenantId);
+  if (c.status === 'connected') return res.json({ success: true, connection: c });
+
+  const digits = normalizeDigits(String(req.body?.phone || ''));
+  if (digits.length < 10) {
+    return res.status(400).json({ error: 'Number sahi nahi. Is tarah likhein: 923001234567' });
+  }
+
+  const old = waSockets[tenantId];
+  if (old) {
+    delete waSockets[tenantId];
+    try {
+      old.end(undefined);
+    } catch (e) {
+      /* ignore */
+    }
+  }
+  c.pairingCode = '';
+  c.qrCodeDataUrl = '';
+  c.qrCodeRaw = '';
+  waRetries[tenantId] = 0;
+  startWhatsApp(tenantId, digits);
+
+  for (let i = 0; i < 24 && !c.pairingCode && c.status !== 'connected'; i++) {
+    await sleep(500);
+  }
+  res.json({ success: true, connection: c });
+});
+
+// Seedha link karne ka page: /wa-link (password gate ke peeche)
+const WA_LINK_PAGE = `<!doctype html><html lang="ur"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>WhatsApp Link</title>
+<style>
+body{margin:0;background:#0b0f0e;color:#e5e7eb;font-family:system-ui,sans-serif;padding:16px}
+.card{max-width:420px;margin:0 auto 16px;background:#111816;border:1px solid #1f2d29;border-radius:16px;padding:20px}
+h1{font-size:20px;margin:0 0 4px;color:#10b981}h2{font-size:16px;margin:0 0 10px}
+p{font-size:14px;color:#9ca3af;margin:6px 0}
+button{width:100%;padding:12px;border:0;border-radius:10px;background:#10b981;color:#04130e;font-size:16px;font-weight:700;margin-top:10px}
+button.red{background:#ef4444;color:#fff}
+input{width:100%;box-sizing:border-box;padding:12px;border-radius:10px;border:1px solid #2a3b36;background:#0b0f0e;color:#fff;font-size:16px}
+#status{display:inline-block;padding:4px 10px;border-radius:999px;font-size:13px;font-weight:700;background:#3f1d1d;color:#f87171}
+#status.ok{background:#052e1f;color:#34d399}#status.wait{background:#3a2f0b;color:#fbbf24}
+#qr{background:#fff;padding:12px;border-radius:12px;display:none;margin-top:12px;text-align:center}
+#qr img{width:100%;max-width:300px}
+#code{font-size:32px;letter-spacing:4px;text-align:center;font-weight:800;color:#fbbf24;margin-top:12px}
+</style></head><body>
+<div class="card"><h1>WhatsApp Link</h1>
+<p>Status: <span id="status">...</span></p><p id="num"></p></div>
+<div class="card"><h2>Tareeqa 1: Phone number se code (behtar)</h2>
+<p>Apna number country code ke saath likhein, maslan 923001234567 (+ ke baghair).</p>
+<input id="phone" type="tel" inputmode="numeric" placeholder="923001234567">
+<button onclick="pair()">Code banayein</button>
+<div id="code"></div>
+<p>Phone mein WhatsApp kholein, Settings, Linked Devices, Link a Device, phir "Link with phone number instead" dabayein aur ye code daalein.</p></div>
+<div class="card"><h2>Tareeqa 2: QR code</h2>
+<button onclick="startQr()">QR banayein</button>
+<div id="qr"><img id="qrimg" alt="QR"></div>
+<p>QR har 20 second mein badalta hai, ye page usay khud naya kar deta hai. Isay kisi doosri screen par khol kar scan karein.</p></div>
+<div class="card"><button class="red" onclick="disc()">Disconnect / naya shuru karein</button></div>
+<script>
+function api(url, opts){return fetch(url, opts||{}).then(function(r){return r.json();});}
+function render(c){
+  var st=document.getElementById('status');
+  if(c.status==='connected'){st.textContent='Connected';st.className='ok';}
+  else if(c.status==='qr_ready'){st.textContent='Scan / code ka intezar';st.className='wait';}
+  else{st.textContent='Disconnected';st.className='';}
+  document.getElementById('num').textContent=(c.status==='connected'&&c.phoneNumber)?('Number: '+c.phoneNumber):'';
+  var q=document.getElementById('qr');
+  if(c.qrCodeDataUrl&&c.status!=='connected'){document.getElementById('qrimg').src=c.qrCodeDataUrl;q.style.display='block';}else{q.style.display='none';}
+  var code=c.pairingCode||'';
+  document.getElementById('code').textContent=(code&&c.status!=='connected')?(code.length===8?code.slice(0,4)+'-'+code.slice(4):code):'';
+}
+function refresh(){api('/api/state').then(function(d){render(d.connection||{});}).catch(function(){});}
+function startQr(){api('/api/connection/qr',{method:'POST'}).then(function(d){render(d.connection||{});});}
+function pair(){
+  var p=document.getElementById('phone').value;
+  api('/api/connection/pair',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({phone:p})}).then(function(d){
+    if(d.error){alert(d.error);return;}
+    render(d.connection||{});
+  });
+}
+function disc(){api('/api/connection/disconnect',{method:'POST'}).then(function(d){render(d.connection||{});});}
+setInterval(refresh,2000);refresh();
+</script></body></html>`;
+
+app.get('/wa-link', (req, res) => {
+  res.status(200).set({ 'Content-Type': 'text/html; charset=utf-8' }).send(WA_LINK_PAGE);
 });
 
 app.post('/api/categories', requirePermission('manage_categories'), (req, res) => {
