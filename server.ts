@@ -667,6 +667,18 @@ function incomingText(message: any): string {
   return m.conversation || m.extendedTextMessage?.text || m.imageMessage?.caption || m.videoMessage?.caption || '';
 }
 
+// Bheje hue messages yaad rakhna (WhatsApp dobara maange to dobara bhejne ke liye)
+const waSentCache = new Map<string, any>();
+function rememberSent(sent: any) {
+  const id = sent?.key?.id;
+  if (!id || !sent.message) return;
+  waSentCache.set(id, sent.message);
+  if (waSentCache.size > 1000) {
+    const first = waSentCache.keys().next().value;
+    if (first) waSentCache.delete(first);
+  }
+}
+
 async function sendWhatsAppText(tenantId: string, phone: string, text: string, replyJid?: string) {
   const sock = waSockets[tenantId];
   if (!sock || ensureConn(tenantId).status !== 'connected') {
@@ -683,7 +695,7 @@ async function sendWhatsAppText(tenantId: string, phone: string, text: string, r
     if (!jid) return { ok: false, error: 'Number ' + phone + ' WhatsApp par nahi mila.' };
     await sock.sendPresenceUpdate('composing', jid);
     await sleep(2000 + Math.random() * 3000);
-    await sock.sendMessage(jid, { text });
+    rememberSent(await sock.sendMessage(jid, { text }));
     await sock.sendPresenceUpdate('paused', jid);
     console.log('WhatsApp jawab bheja gaya: ' + phone);
     return { ok: true, error: '' };
@@ -886,6 +898,7 @@ async function startWhatsApp(tenantId: string, pairingPhone?: string) {
       logger,
       browser: ['WhatsApp Hub', 'Chrome', '1.0.0'],
       markOnlineOnConnect: false,
+      getMessage: async (key: any) => waSentCache.get(key?.id),
       syncFullHistory: false,
     });
 
@@ -1707,7 +1720,7 @@ app.post('/api/messages/send', requirePermission('send_messages'), async (req, r
     }
     await sock.sendPresenceUpdate('composing', jid);
     await sleep(2000 + Math.random() * 3000);
-    await sock.sendMessage(jid, { text: messageContent });
+    rememberSent(await sock.sendMessage(jid, { text: messageContent }));
     await sock.sendPresenceUpdate('paused', jid);
   } catch (err: any) {
     console.error('WhatsApp send error:', err?.message || err);
