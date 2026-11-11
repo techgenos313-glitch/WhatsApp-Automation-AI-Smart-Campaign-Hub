@@ -651,6 +651,214 @@ async function useSupabaseAuthState(tenantId: string) {
   };
 }
 
+// ===== ASLI AANE WALE MESSAGES (inbox + AI jawab) =====
+const GEMINI_MODEL_INBOX = process.env.GEMINI_MODEL || 'gemini-3.8-flash';
+const waIncomingSeen = new Set<string>();
+
+function pnDigits(jid: any): string {
+  return String(jid || '').split('@')[0].split(':')[0].replace(/\D/g, '');
+}
+
+function incomingText(message: any): string {
+  let m: any = message;
+  if (!m) return '';
+  if (m.ephemeralMessage) m = m.ephemeralMessage.message || m;
+  if (m.viewOnceMessage) m = m.viewOnceMessage.message || m;
+  return m.conversation || m.extendedTextMessage?.text || m.imageMessage?.caption || m.videoMessage?.caption || '';
+}
+
+async function sendWhatsAppText(tenantId: string, phone: string, text: string, replyJid?: string) {
+  const sock = waSockets[tenantId];
+  if (!sock || ensureConn(tenantId).status !== 'connected') {
+    return { ok: false, error: 'WhatsApp connected nahi hai.' };
+  }
+  try {
+    const jid = replyJid || (await resolveJid(sock, phone));
+    if (!jid) return { ok: false, error: 'Number ' + phone + ' WhatsApp par nahi mila.' };
+    await sock.sendPresenceUpdate('composing', jid);
+    await sleep(2000 + Math.random() * 3000);
+    await sock.sendMessage(jid, { text });
+    await sock.sendPresenceUpdate('paused', jid);
+    return { ok: true, error: '' };
+  } catch (e: any) {
+    return { ok: false, error: e?.message || 'unknown' };
+  }
+}
+
+async function generateInboxAnswer(tenant: any, clientName: string, text: string): Promise<string> {
+  let answer =
+    'وعلیکم السلام ' + clientName + '! ہم سے رابطہ کرنے کا شکریہ۔ مزید معلومات کے لیے اس نمبر (' + tenant.senderNumber + ') پر رابطہ کر سکتے ہیں۔';
+  if (aiClient) {
+    try {
+      const response = await aiClient.models.generateContent({
+        model: GEMINI_MODEL_INBOX,
+        contents:
+          'CLIENT MESSAGE: "' + text + '"\nCLIENT NAME: "' + clientName + '"\nBUSINESS: "' + tenant.name + '"\n\n' +
+          'BILINGUAL RULE:\n1. Detect if the CLIENT MESSAGE is in Urdu / Roman Urdu or English.\n' +
+          '2. If Urdu/Roman Urdu -> reply in polite Roman Urdu or Urdu text.\n3. If English -> reply in professional English.\n' +
+          '4. Keep answer under 2-3 short sentences. Mention contact number ' + tenant.senderNumber + '.',
+        config: { systemInstruction: tenant.aiSystemInstruction },
+      });
+      if (response.text) answer = response.text.trim();
+    } catch (e) {
+      console.error('Gemini jawab banane mein masla:', e);
+    }
+  }
+  return answer;
+}
+
+function registerIncoming(tenantId: string, sock: any) {
+  sock.ev.on('messages.upsert', async (ev: any) => {
+    if (ev.type !== 'notify') return;
+    for (const msg of ev.messages || []) {
+      try {
+        const key = msg.key || {};
+        const remoteJid: string = key.remoteJid || '';
+        if (!remoteJid || key.fromMe) continue;
+        if (remoteJid.endsWith('@g.us') || remoteJid.endsWith('@broadcast') || remoteJid.endsWith('@newsletter')) continue;
+        if (key.id) {
+          if (waIncomingSeen.has(key.id)) continue;
+          waIncomingSeen.add(key.id);
+          if (waIncomingSeen.size > 500) waIncomingSeen.clear();
+        }
+        const text = String(incomingText(msg.message) || '').trim();
+        if (!text) continue;
+
+        const pnJid: string = key.remoteJidAlt || key.senderPn || (remoteJid.endsWith('@s.whatsapp.net') ? remoteJid : '');
+        const digits = pnDigits(pnJid);
+        if (digits.length < 10) {
+          console.log('Aane wale message ka number nahi pehchana (' + remoteJid + '), ignore.');
+          continue;
+        }
+
+        const client = db.clients.find(
+          (c) => c.tenantId === tenantId && normalizeDigits(c.phone).slice(-10) === digits.slice(-10)
+        );
+        if (!client) {
+          console.log('Anjaan number ka message, ignore: ' + digits);
+          continue;
+        }
+        const tenant = db.tenants.find((t) => t.id === tenantId) || db.tenants[0];
+
+        db.messages.unshift({
+          id: 'msg_inc_' + Date.now() + '_' + Math.random().toString(36).substring(2, 6),
+          tenantId,
+          contactId: client.id,
+          contactName: client.name,
+          contactPhone: client.phone,
+          category: client.category || 'general',
+          direction: 'incoming' as const,
+          content: text,
+          videoUrl: '',
+          footerText: '',
+          status: 'read' as const,
+          timestamp: new Date().toISOString(),
+          isAiGenerated: false,
+        });
+
+        if (/^\s*(stop|unsubscribe|band\s*karo|band\s*kar\s*do)\s*$/i.test(text)) {
+          client.status = 'unsubscribed' as any;
+          saveDb();
+          console.log('Client ne band karne ko kaha: ' + client.name);
+          continue;
+        }
+        if ((client.status as string) === 'unsubscribed') {
+          saveDb();
+          continue;
+        }
+        if ((client.status as string) !== 'converted') client.status = 'interested' as any;
+
+        const pending = db.aiQueue.find(
+          (q) => q.real && q.contactId === client.id && (q.status === 'waiting' || q.status === 'ready' || q.status === 'sending')
+        );
+        if (pending) {
+          saveDb();
+          continue;
+        }
+
+        const answer = await generateInboxAnswer(tenant, client.name, text);
+        const delaySec = (tenant.aiDelayMinutes || 5) * 60;
+        db.aiQueue.unshift({
+          id: 'ai_queue_' + Date.now() + '_' + Math.random().toString(36).substring(2, 6),
+          tenantId,
+          contactId: client.id,
+          contactName: client.name,
+          contactPhone: client.phone,
+          incomingMessage: text,
+          category: client.category || 'general',
+          generatedAnswer: answer,
+          scheduledTime: Date.now() + delaySec * 1000,
+          delaySecondsLeft: delaySec,
+          status: 'waiting',
+          createdAt: new Date().toISOString(),
+          real: true,
+          replyJid: remoteJid,
+        });
+        saveDb();
+        console.log('Asli message mila (' + client.name + '), AI jawab queue mein.');
+      } catch (e) {
+        console.error('Aane wale message mein masla:', e);
+      }
+    }
+  });
+}
+
+// Asli AI jawab: waqt poora hone par WhatsApp se bhejna
+let waAiBusy = false;
+setInterval(async () => {
+  if (waAiBusy) return;
+  waAiBusy = true;
+  try {
+    const dueIds: string[] = db.aiQueue
+      .filter((q) => q.real && (q.status === 'waiting' || q.status === 'ready') && Date.now() >= q.scheduledTime)
+      .map((q) => q.id);
+    for (const id of dueIds) {
+      const item = db.aiQueue.find((q) => q.id === id);
+      if (!item) continue;
+      if (ensureConn(item.tenantId).status !== 'connected') continue;
+      item.status = 'sending';
+      const r = await sendWhatsAppText(item.tenantId, item.contactPhone, item.generatedAnswer, item.replyJid);
+      const cur = db.aiQueue.find((q) => q.id === id);
+      if (!cur) continue;
+      if (r.ok) {
+        cur.status = 'sent';
+        cur.delaySecondsLeft = 0;
+        const tenant = db.tenants.find((t) => t.id === cur.tenantId) || db.tenants[0];
+        db.messages.unshift({
+          id: 'msg_ai_auto_' + Date.now(),
+          tenantId: cur.tenantId,
+          contactId: cur.contactId,
+          contactName: cur.contactName,
+          contactPhone: cur.contactPhone,
+          category: cur.category,
+          direction: 'outgoing' as const,
+          content: '🤖 [Bilingual Gemini AI Reply]:\n' + cur.generatedAnswer,
+          videoUrl: '',
+          footerText: tenant.enableUrduFooter ? tenant.urduFooter : '',
+          status: 'delivered' as const,
+          timestamp: new Date().toISOString(),
+          isAiGenerated: true,
+        });
+      } else {
+        cur.attempts = (cur.attempts || 0) + 1;
+        console.error('AI jawab bhejne mein masla (' + cur.contactName + '): ' + r.error);
+        if (cur.attempts >= 3) {
+          cur.status = 'failed';
+        } else {
+          cur.status = 'ready';
+          cur.scheduledTime = Date.now() + 60000;
+        }
+      }
+      saveDb();
+    }
+  } catch (e) {
+    console.error('AI queue worker error:', e);
+  } finally {
+    waAiBusy = false;
+  }
+}, 4000);
+// ===== END ASLI AANE WALE MESSAGES =====
+
 async function startWhatsApp(tenantId: string, pairingPhone?: string) {
   if (waStarting[tenantId]) return;
   waStarting[tenantId] = true;
@@ -692,6 +900,7 @@ async function startWhatsApp(tenantId: string, pairingPhone?: string) {
     }
 
     sock.ev.on('creds.update', auth.saveCreds);
+    registerIncoming(tenantId, sock);
 
     sock.ev.on('connection.update', async (update: any) => {
       const { connection, lastDisconnect, qr } = update;
@@ -1617,7 +1826,7 @@ BILINGUAL RULE:
   });
 });
 
-app.post('/api/ai-queue/send-now', requirePermission('send_messages'), (req, res) => {
+app.post('/api/ai-queue/send-now', requirePermission('send_messages'), async (req, res) => {
   const tenantId = getTenantId(req);
   const activeTenant = db.tenants.find((t) => t.id === tenantId) || db.tenants[0];
   const { queueId } = req.body;
@@ -1642,6 +1851,18 @@ app.post('/api/ai-queue/send-now', requirePermission('send_messages'), (req, res
     isAiGenerated: true,
   };
 
+  if (item.real) {
+    if (item.status === 'sending' || item.status === 'sent') {
+      return res.status(409).json({ error: 'Ye jawab pehle hi bheja ja chuka hai.' });
+    }
+    db.aiQueue[itemIdx].status = 'sending';
+    const sent = await sendWhatsAppText(tenantId, item.contactPhone, item.generatedAnswer, item.replyJid);
+    if (!sent.ok) {
+      const cur = db.aiQueue.find((q) => q.id === queueId);
+      if (cur) cur.status = 'ready';
+      return res.status(502).json({ error: 'Jawab bhejne mein masla aaya: ' + sent.error });
+    }
+  }
   db.messages.unshift(aiMessage);
   db.aiQueue[itemIdx].status = 'sent';
   db.aiQueue[itemIdx].delaySecondsLeft = 0;
@@ -1675,7 +1896,7 @@ setInterval(() => {
   let changed = false;
 
   db.aiQueue.forEach((item) => {
-    if (item.status === 'waiting' && now >= item.scheduledTime) {
+    if (!item.real && item.status === 'waiting' && now >= item.scheduledTime) {
       const activeTenant = db.tenants.find((t) => t.id === item.tenantId) || db.tenants[0];
       item.status = 'sent';
       item.delaySecondsLeft = 0;
