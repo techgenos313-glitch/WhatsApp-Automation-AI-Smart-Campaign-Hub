@@ -673,14 +673,22 @@ async function sendWhatsAppText(tenantId: string, phone: string, text: string, r
     return { ok: false, error: 'WhatsApp connected nahi hai.' };
   }
   try {
-    const jid = replyJid || (await resolveJid(sock, phone));
+    let jid: string | null = null;
+    try {
+      jid = await resolveJid(sock, phone);
+    } catch (e) {
+      jid = null;
+    }
+    if (!jid) jid = replyJid || null;
     if (!jid) return { ok: false, error: 'Number ' + phone + ' WhatsApp par nahi mila.' };
     await sock.sendPresenceUpdate('composing', jid);
     await sleep(2000 + Math.random() * 3000);
     await sock.sendMessage(jid, { text });
     await sock.sendPresenceUpdate('paused', jid);
+    console.log('WhatsApp jawab bheja gaya: ' + phone);
     return { ok: true, error: '' };
   } catch (e: any) {
+    console.error('WhatsApp jawab bhejne mein masla (' + phone + '): ' + (e?.message || e));
     return { ok: false, error: e?.message || 'unknown' };
   }
 }
@@ -832,7 +840,7 @@ setInterval(async () => {
           contactPhone: cur.contactPhone,
           category: cur.category,
           direction: 'outgoing' as const,
-          content: '🤖 [Bilingual Gemini AI Reply]:\n' + cur.generatedAnswer,
+          content: cur.generatedAnswer,
           videoUrl: '',
           footerText: tenant.enableUrduFooter ? tenant.urduFooter : '',
           status: 'delivered' as const,
@@ -1843,7 +1851,7 @@ app.post('/api/ai-queue/send-now', requirePermission('send_messages'), async (re
     contactPhone: item.contactPhone,
     category: item.category,
     direction: 'outgoing' as const,
-    content: `🤖 [Bilingual Gemini AI Auto-Reply]:\n${item.generatedAnswer}`,
+    content: item.generatedAnswer,
     videoUrl: '',
     footerText: activeTenant.enableUrduFooter ? activeTenant.urduFooter : '',
     status: 'delivered' as const,
@@ -1909,7 +1917,7 @@ setInterval(() => {
         contactPhone: item.contactPhone,
         category: item.category,
         direction: 'outgoing' as const,
-        content: `🤖 [Bilingual Gemini AI Reply - 5 Min Delayed]:\n${item.generatedAnswer}`,
+        content: item.generatedAnswer,
         videoUrl: '',
         footerText: activeTenant.enableUrduFooter ? activeTenant.urduFooter : '',
         status: 'delivered' as const,
